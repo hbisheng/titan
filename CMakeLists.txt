@@ -9,7 +9,7 @@ if (NOT ROCKSDB_GIT_REPO)
 endif()
 
 if (NOT ROCKSDB_GIT_BRANCH)
-  set(ROCKSDB_GIT_BRANCH "tikv-cherry-pick") # should at least or newer than commit dcf2f8d56092285381be2acbf8f04b8aeeb7ad79
+  set(ROCKSDB_GIT_BRANCH "break-things") # should at least or newer than commit dcf2f8d56092285381be2acbf8f04b8aeeb7ad79
 endif()
 
 if (NOT DEFINED ROCKSDB_DIR)
