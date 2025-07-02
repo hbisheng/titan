@@ -124,9 +124,9 @@ class TitanDBIterator : public Iterator {
 
     Status s;
     BlobIndex index;
-    s = DecodeInto(iter_->value(), &index);
+    s = DecodeInto(iter_->value(), &index, true /* ignore_extra_bytes */);
     if (!s.ok()) {
-      TITAN_LOG_ERROR(
+      TITAN_LOG_INFO(
           info_log_, "Titan iterator: failed to decode blob index %s: %s",
           iter_->value().ToString(true /*hex*/).c_str(), s.ToString().c_str());
       info_log_->Flush();
@@ -149,7 +149,7 @@ class TitanDBIterator : public Iterator {
       std::unique_ptr<BlobFilePrefetcher> prefetcher;
       s = storage_->NewPrefetcher(index.file_number, &prefetcher);
       if (!s.ok()) {
-        TITAN_LOG_ERROR(
+        TITAN_LOG_INFO(
             info_log_,
             "Titan iterator: failed to create prefetcher for blob file %" PRIu64
             ": %s",
@@ -165,7 +165,7 @@ class TitanDBIterator : public Iterator {
     OwnedSlice blob;
     s = it->second->Get(options_, index.blob_handle, &record_, &blob);
     if (!s.ok()) {
-      TITAN_LOG_ERROR(
+      TITAN_LOG_INFO(
           info_log_,
           "Titan iterator: failed to read blob value from file %" PRIu64
           ", offset %" PRIu64 ", size %" PRIu64 ": %s\n",
