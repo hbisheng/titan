@@ -129,6 +129,7 @@ class TitanDBIterator : public Iterator {
       TITAN_LOG_ERROR(
           info_log_, "Titan iterator: failed to decode blob index %s: %s",
           iter_->value().ToString(true /*hex*/).c_str(), s.ToString().c_str());
+      info_log_->Flush();
       if (options_.abort_on_failure) std::abort();
       return s;
     }
@@ -153,6 +154,7 @@ class TitanDBIterator : public Iterator {
             "Titan iterator: failed to create prefetcher for blob file %" PRIu64
             ": %s",
             index.file_number, s.ToString().c_str());
+        info_log_->Flush();
         if (options_.abort_on_failure) std::abort();
         return s;
       }
@@ -169,6 +171,7 @@ class TitanDBIterator : public Iterator {
           ", offset %" PRIu64 ", size %" PRIu64 ": %s\n",
           index.file_number, index.blob_handle.offset, index.blob_handle.size,
           s.ToString().c_str());
+      info_log_->Flush();
       if (options_.abort_on_failure) std::abort();
     }
 
