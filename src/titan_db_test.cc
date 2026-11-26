@@ -481,6 +481,49 @@ TEST_F(TitanDBTest, RawSizeBackfillReadError) {
   ReadBlobIndex(db_, "key", &index);
   ASSERT_TRUE(index.has_raw_value_size);
 }
+
+TEST_F(TitanDBTest, RawSizeBackfillFailureCleansBlobFiles) {
+  options_.min_blob_size = 32768;
+  options_.blob_file_target_size = 1024;
+  options_.blob_file_compression = kNoCompression;
+  Open();
+  // During compaction, a rotates an output file and b leaves one active.
+  ASSERT_OK(db_->Put(WriteOptions(), "a", std::string(4096, 'a')));
+  ASSERT_OK(db_->Put(WriteOptions(), "b", std::string(64, 'b')));
+  ASSERT_OK(db_->Put(WriteOptions(), "z", std::string(65536, 'z')));
+  Flush();
+  options_.min_blob_size = 1;
+  options_.enable_blob_index_raw_size = true;
+  Reopen();
+  auto count_files = [&]() {
+    std::vector<std::string> files;
+    EXPECT_OK(env_->GetChildren(options_.dirname, &files));
+    size_t count = 0;
+    for (const auto& file : files) {
+      if (file.size() >= 5 && file.substr(file.size() - 5) == ".blob") ++count;
+    }
+    return count;
+  };
+  auto before = count_files();
+  ASSERT_EQ(before, 1);
+  SyncPoint::GetInstance()->SetCallBack(
+      "BlobDecoder::DecodeRecord",
+      [&](void* arg) { ++*reinterpret_cast<uint32_t*>(arg); });
+  SyncPoint::GetInstance()->EnableProcessing();
+  CompactRangeOptions compact;
+  compact.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  Status s = db_->CompactRange(compact, nullptr, nullptr);
+  SyncPoint::GetInstance()->DisableProcessing();
+  ASSERT_TRUE(s.IsCorruption()) << s.ToString();
+  ASSERT_OK(db_impl_->TEST_PurgeObsoleteFiles());
+  EXPECT_EQ(count_files(), before);
+  VerifyDB({{"a", std::string(4096, 'a')},
+            {"b", std::string(64, 'b')},
+            {"z", std::string(65536, 'z')}});
+  Reopen();
+  EXPECT_EQ(count_files(), before);
+}
+
 #endif
 
 TEST_F(TitanDBTest, Open) {

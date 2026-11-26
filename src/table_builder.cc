@@ -334,6 +334,7 @@ Status TitanTableBuilder::Finish() {
 }
 
 void TitanTableBuilder::Abandon() {
+  Status s = status();
   base_builder_->Abandon();
   if (blob_builder_) {
     TITAN_LOG_INFO(db_options_.info_log,
@@ -341,8 +342,18 @@ void TitanTableBuilder::Abandon() {
                    ".",
                    blob_handle_->GetNumber());
     blob_builder_->Abandon();
-    status_ = blob_manager_->DeleteFile(std::move(blob_handle_));
+    blob_builder_.reset();
+    Status cleanup = blob_manager_->DeleteFile(std::move(blob_handle_));
+    if (s.ok()) s = cleanup;
   }
+  // Rotated outputs are still uninstalled until Finish calls BatchFinishFiles.
+  for (auto& file : finished_blobs_) {
+    Status cleanup = blob_manager_->DeleteFile(std::move(file.second));
+    if (s.ok()) s = cleanup;
+  }
+  finished_blobs_.clear();
+  // Keep the original construction error when cleanup succeeds or also fails.
+  status_ = s;
 }
 
 uint64_t TitanTableBuilder::NumEntries() const {
