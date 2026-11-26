@@ -74,6 +74,12 @@ void BlobFileBuilder::Add(const BlobRecord& record,
                           std::unique_ptr<BlobRecordContext> ctx,
                           OutContexts* out_ctx) {
   if (!ok()) return;
+  if (cf_options_.enable_blob_index_raw_size) {
+    // Capture before dictionary buffering; the context follows this record
+    // through flush, compaction, and GC.
+    ctx->new_blob_index.has_raw_value_size = true;
+    ctx->new_blob_index.raw_value_size = record.value.size();
+  }
   std::string key = record.key.ToString();
   if (builder_state_ == BuilderState::kBuffered) {
     std::string record_str;

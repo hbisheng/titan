@@ -347,8 +347,30 @@ TEST_F(TableBuilderTest, Basic) {
   }
 }
 
+TEST_F(TableBuilderTest, RawSizeMissingBlob) {
+  cf_options_.enable_blob_index_raw_size = true;
+  table_factory_.reset(new TitanTableFactory(db_options_, cf_options_,
+                                             blob_manager_, &mutex_,
+                                             blob_file_set_.get(), nullptr));
+  std::unique_ptr<WritableFileWriter> file;
+  NewBaseFileWriter(&file);
+  std::unique_ptr<TableBuilder> builder;
+  NewTableBuilder(base_file_number_, file.get(), &builder, 1);
+  BlobIndex index;
+  index.file_number = 999999;
+  index.blob_handle.size = 100;
+  std::string encoded;
+  index.EncodeTo(&encoded);
+  InternalKey key("obsolete", 1, kTypeTitanBlobIndex);
+  builder->Add(key.Encode(), encoded);
+  ASSERT_OK(builder->status());
+  ASSERT_OK(builder->Finish());
+  ASSERT_OK(file->Close());
+}
+
 TEST_F(TableBuilderTest, DictCompress) {
 #if ZSTD_VERSION_NUMBER >= 10103
+  cf_options_.enable_blob_index_raw_size = true;
   CompressionOptions compression_opts;
   compression_opts.enabled = true;
   compression_opts.max_dict_bytes = 4000;
@@ -399,6 +421,8 @@ TEST_F(TableBuilderTest, DictCompress) {
     BlobIndex index;
     ASSERT_OK(DecodeInto(iter->value(), &index));
     ASSERT_EQ(index.file_number, kTestFileNumber);
+    ASSERT_TRUE(index.has_raw_value_size);
+    ASSERT_EQ(index.raw_value_size, kMinBlobSize);
     BlobRecord record;
     OwnedSlice buffer;
     ASSERT_OK(blob_reader->Get(ro, index.blob_handle, &record, &buffer));

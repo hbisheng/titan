@@ -162,9 +162,14 @@ struct BlobHandle {
 struct BlobIndex {
   enum Type : unsigned char {
     kBlobRecord = 1,
+    kBlobRecordWithRawSize = 2,
   };
   uint64_t file_number{0};
   BlobHandle blob_handle;
+  // Version 2 appends the uncompressed value length (excluding the key and
+  // record headers). Presence is separate so an empty value is representable.
+  bool has_raw_value_size{false};
+  uint64_t raw_value_size{0};
 
   void EncodeTo(std::string* dst) const;
   Status DecodeFrom(Slice* src);

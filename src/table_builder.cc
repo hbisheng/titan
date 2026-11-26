@@ -119,16 +119,47 @@ void TitanTableBuilder::Add(const Slice& key, const Slice& value) {
 void TitanTableBuilder::AddBase(const Slice& key,
                                 const ParsedInternalKey& parsedKey,
                                 const Slice& value) {
+  Slice output_value = value;
+  std::string encoded_index;
+  if (parsedKey.type == kTypeTitanBlobIndex &&
+      cf_options_.enable_blob_index_raw_size) {
+    BlobIndex index;
+    status_ = DecodeInto(value, &index);
+    if (!ok()) return;
+    if (!index.has_raw_value_size) {
+      BlobRecord record;
+      OwnedSlice buffer;
+      uint64_t prev_read = 0, prev_written = 0;
+      SavePrevIOBytes(&prev_read, &prev_written);
+      Status s = GetBlobRecord(index, &record, &buffer);
+      UpdateIOBytes(prev_read, prev_written, &io_bytes_read_,
+                    &io_bytes_written_);
+      if (s.ok()) {
+        bytes_read_ += record.size();
+        index.has_raw_value_size = true;
+        index.raw_value_size = record.value.size();
+        index.EncodeTo(&encoded_index);
+        output_value = encoded_index;
+      } else if (s.IsNotFound() || s.IsPathNotFound()) {
+        // GC may have removed a blob referenced only by an obsolete LSM entry.
+        // Preserve that index, as in fallback/level merge, until it is dropped.
+        ++error_read_cnt_;
+      } else {
+        status_ = s;
+        return;
+      }
+    }
+  }
   // "parsedKey" was parsed from "key" (i.e., an internal key).
   if (builder_unbuffered()) {
     // We can directly append this into SST safely, without disorder issue.
     // Only when base_builder_ is in unbuffered state
-    base_builder_->Add(key, value);
+    base_builder_->Add(key, output_value);
   } else {
     // We have to let builder to cache this KV pair, and it will be flushed to
     // base table when the state changes to unbuffered
     std::unique_ptr<BlobFileBuilder::BlobRecordContext> ctx =
-        NewCachedRecordContext(parsedKey, value);
+        NewCachedRecordContext(parsedKey, output_value);
     blob_builder_->AddSmall(std::move(ctx));
   }
 }
@@ -276,6 +307,12 @@ Status TitanTableBuilder::status() const {
 }
 
 Status TitanTableBuilder::Finish() {
+  if (!ok()) {
+    Status s = status();
+    Abandon();
+    status_ = s;
+    return s;
+  }
   FinishBlobFile();
   // `FinishBlobFile()` may transform its state from `kBuffered` to
   // `kUnbuffered`, in this case, the relative blob handles will be updated, so
@@ -290,7 +327,7 @@ Status TitanTableBuilder::Finish() {
   UpdateInternalOpStats();
   if (error_read_cnt_ > 0) {
     TITAN_LOG_ERROR(db_options_.info_log,
-                    "Read file error %" PRIu64 " times during level merge",
+                    "Read file error %" PRIu64 " times during SST construction",
                     error_read_cnt_);
   }
   return status();

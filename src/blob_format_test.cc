@@ -35,6 +35,40 @@ TEST(BlobFormatTest, BlobIndex) {
   CheckCodec(input);
 }
 
+TEST(BlobFormatTest, RawValueSize) {
+  BlobIndex index;
+  index.file_number = 1;
+  index.blob_handle.offset = 2;
+  index.blob_handle.size = 3;
+  std::string legacy;
+  index.EncodeTo(&legacy);
+  ASSERT_EQ(legacy, std::string("\x01\x01\x02\x03", 4));
+  for (uint64_t size :
+       {uint64_t(0), uint64_t(1), uint64_t(1000000), UINT64_MAX}) {
+    index.has_raw_value_size = true;
+    index.raw_value_size = size;
+    std::string encoded;
+    index.EncodeTo(&encoded);
+    ASSERT_EQ(encoded[0], BlobIndex::kBlobRecordWithRawSize);
+    BlobIndex decoded;
+    ASSERT_OK(DecodeInto(encoded, &decoded));
+    ASSERT_TRUE(decoded.has_raw_value_size);
+    ASSERT_EQ(decoded.raw_value_size, size);
+    ASSERT_EQ(decoded, index);
+    ASSERT_OK(DecodeInto(legacy, &decoded));
+    ASSERT_FALSE(decoded.has_raw_value_size);
+    ASSERT_EQ(decoded.raw_value_size, 0);
+    // GC must recognize the same record before and after size backfill.
+    ASSERT_EQ(decoded, index);
+    encoded.pop_back();
+    ASSERT_TRUE(DecodeInto(encoded, &decoded).IsCorruption());
+  }
+  BlobIndex decoded;
+  ASSERT_TRUE(
+      DecodeInto(std::string("\x03\x01\x02\x03", 4), &decoded).IsCorruption());
+  ASSERT_TRUE(DecodeInto(legacy + "x", &decoded).IsCorruption());
+}
+
 TEST(BlobFormatTest, BlobFileMeta) {
   BlobFileMeta input(2, 3, 0, 0, "0", "9");
   CheckCodec(input);

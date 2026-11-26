@@ -80,6 +80,13 @@ struct TitanCFOptions : public ColumnFamilyOptions {
   // Default: 4096
   uint64_t min_blob_size{4096};
 
+  // Write version 2 blob indices with the uncompressed value length. Reused
+  // legacy indices are backfilled by reading the blob during SST construction.
+  // Enable only after all readers have been upgraded. Disabling this option
+  // does not remove existing version 2 indices or restore downgrade safety.
+  // Immutable; changing it requires reopening the DB. Default: false.
+  bool enable_blob_index_raw_size{false};
+
   // The compression algorithm used to compress data in blob files.
   //
   // Default: kNoCompression
@@ -197,7 +204,8 @@ struct ImmutableTitanCFOptions {
   ImmutableTitanCFOptions() : ImmutableTitanCFOptions(TitanCFOptions()) {}
 
   explicit ImmutableTitanCFOptions(const TitanCFOptions& opts)
-      : blob_file_target_size(opts.blob_file_target_size),
+      : enable_blob_index_raw_size(opts.enable_blob_index_raw_size),
+        blob_file_target_size(opts.blob_file_target_size),
         blob_cache(opts.blob_cache),
         max_gc_batch_size(opts.max_gc_batch_size),
         min_gc_batch_size(opts.min_gc_batch_size),
@@ -205,6 +213,7 @@ struct ImmutableTitanCFOptions {
         level_merge(opts.level_merge),
         skip_value_in_compaction_filter(opts.skip_value_in_compaction_filter) {}
 
+  bool enable_blob_index_raw_size;
   uint64_t blob_file_target_size;
 
   std::shared_ptr<Cache> blob_cache;

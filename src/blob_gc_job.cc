@@ -294,9 +294,7 @@ void BlobGCJob::BatchWriteNewIndices(BlobFileBuilder::OutContexts& contexts,
   auto* cfh = blob_gc_->column_family_handle();
   for (const std::unique_ptr<BlobFileBuilder::BlobRecordContext>& ctx :
        contexts) {
-    BlobIndex blob_index;
-    blob_index.file_number = ctx->new_blob_index.file_number;
-    blob_index.blob_handle = ctx->new_blob_index.blob_handle;
+    const BlobIndex& blob_index = ctx->new_blob_index;
 
     std::string index_entry;
     BlobIndex original_index = ctx->original_blob_index;

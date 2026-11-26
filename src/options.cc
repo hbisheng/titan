@@ -34,6 +34,7 @@ TitanCFOptions::TitanCFOptions(const ColumnFamilyOptions& cf_opts,
                                const MutableTitanCFOptions& mutable_opts)
     : ColumnFamilyOptions(cf_opts),
       min_blob_size(mutable_opts.min_blob_size),
+      enable_blob_index_raw_size(immutable_opts.enable_blob_index_raw_size),
       blob_file_compression(mutable_opts.blob_file_compression),
       blob_file_target_size(immutable_opts.blob_file_target_size),
       blob_cache(immutable_opts.blob_cache),
@@ -51,6 +52,8 @@ void TitanCFOptions::Dump(Logger* logger) const {
   TITAN_LOG_HEADER(logger,
                    "TitanCFOptions.min_blob_size                : %" PRIu64,
                    min_blob_size);
+  TITAN_LOG_HEADER(logger, "TitanCFOptions.enable_blob_index_raw_size : %d",
+                   enable_blob_index_raw_size);
   std::string compression_str = "unknown";
   for (auto& compression_type : compression_type_string_map) {
     if (compression_type.second == blob_file_compression) {

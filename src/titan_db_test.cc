@@ -341,6 +341,148 @@ class TitanDBTest : public testing::Test {
   std::vector<ColumnFamilyHandle*> cf_handles_;
 };
 
+// Inspect the stored LSM value without resolving its blob reference.
+static void ReadBlobIndex(TitanDB* db, const std::string& key,
+                          BlobIndex* index) {
+  std::vector<KeyVersion> versions;
+  ASSERT_OK(GetAllKeyVersions(db, key, key, 1, &versions));
+  ASSERT_EQ(versions.size(), 1);
+  ASSERT_EQ(versions[0].type, kTypeTitanBlobIndex);
+  ASSERT_OK(DecodeInto(versions[0].value, index));
+}
+
+TEST_F(TitanDBTest, RawSizeUpgradeAndGC) {
+  Open();
+  std::string value(32768, 'a');
+  ASSERT_FALSE(db_->GetTitanOptions().enable_blob_index_raw_size);
+  ASSERT_OK(db_->Put(WriteOptions(), "old", value));
+  Flush();
+  BlobIndex legacy;
+  ReadBlobIndex(db_, "old", &legacy);
+  ASSERT_FALSE(legacy.has_raw_value_size);
+
+  options_.enable_blob_index_raw_size = true;
+  Reopen();
+  ASSERT_TRUE(db_->GetTitanOptions().enable_blob_index_raw_size);
+  ASSERT_OK(db_->Put(WriteOptions(), "new", value));
+  Flush();
+  BlobIndex index;
+  ReadBlobIndex(db_, "new", &index);
+  ASSERT_TRUE(index.has_raw_value_size);
+  ASSERT_EQ(index.raw_value_size, value.size());
+  ReadBlobIndex(db_, "old", &index);
+  ASSERT_FALSE(index.has_raw_value_size);
+
+  CompactRangeOptions compact;
+  compact.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  ASSERT_OK(db_->CompactRange(compact, nullptr, nullptr));
+  ReadBlobIndex(db_, "old", &index);
+  ASSERT_TRUE(index.has_raw_value_size);
+  ASSERT_EQ(index.raw_value_size, value.size());
+  ASSERT_EQ(index, legacy);  // Backfill does not rewrite the blob file.
+
+#ifndef NDEBUG
+  unsigned reads = 0;
+  SyncPoint::GetInstance()->SetCallBack("BlobFileReader::Get",
+                                        [&](void*) { ++reads; });
+  SyncPoint::GetInstance()->EnableProcessing();
+  ASSERT_OK(db_->CompactRange(compact, nullptr, nullptr));
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  ASSERT_EQ(reads, 0);  // Already backfilled indices cause no blob reads.
+#endif
+
+  // GC's source iterator has no raw size. Its physical-identity checks must
+  // still recognize a backfilled index and preserve size in the replacement.
+  ASSERT_OK(db_impl_->TEST_StartGC(db_->DefaultColumnFamily()->GetID()));
+  ReadBlobIndex(db_, "old", &index);
+  ASSERT_NE(index.file_number, legacy.file_number);
+  ASSERT_TRUE(index.has_raw_value_size);
+  ASSERT_EQ(index.raw_value_size, value.size());
+  Flush();
+  options_.enable_blob_index_raw_size = false;
+  Reopen();
+  VerifyDB({{"new", value}, {"old", value}});
+  ASSERT_OK(db_->Put(WriteOptions(), "disabled", value));
+  Flush();
+  ReadBlobIndex(db_, "disabled", &index);
+  ASSERT_FALSE(index.has_raw_value_size);
+  ReadBlobIndex(db_, "old", &index);
+  ASSERT_TRUE(index.has_raw_value_size);
+}
+
+TEST_F(TitanDBTest, RawSizeGCUpgradesLegacyIndex) {
+  Open();
+  std::string value(32768, 'a');
+  ASSERT_OK(db_->Put(WriteOptions(), "key", value));
+  Flush();
+  BlobIndex legacy;
+  ReadBlobIndex(db_, "key", &legacy);
+  ASSERT_FALSE(legacy.has_raw_value_size);
+  ASSERT_OK(db_->Put(WriteOptions(), "other", value));
+  Flush();
+  options_.enable_blob_index_raw_size = true;
+  Reopen();
+  ASSERT_OK(db_impl_->TEST_StartGC(db_->DefaultColumnFamily()->GetID()));
+  BlobIndex index;
+  ReadBlobIndex(db_, "key", &index);
+  ASSERT_NE(index.file_number, legacy.file_number);
+  ASSERT_TRUE(index.has_raw_value_size);
+  ASSERT_EQ(index.raw_value_size, value.size());
+  VerifyDB({{"key", value}, {"other", value}});
+}
+
+TEST_F(TitanDBTest, RawSizeLevelMerge) {
+  options_.level_merge = true;
+  Open();
+  std::string value(32768, 'a');
+  ASSERT_OK(db_->Put(WriteOptions(), "key", value));
+  Flush();
+  BlobIndex legacy;
+  ReadBlobIndex(db_, "key", &legacy);
+  options_.enable_blob_index_raw_size = true;
+  Reopen();
+  CompactRangeOptions compact;
+  compact.change_level = true;
+  compact.target_level = options_.num_levels - 1;
+  compact.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  ASSERT_OK(db_->CompactRange(compact, nullptr, nullptr));
+  BlobIndex index;
+  ReadBlobIndex(db_, "key", &index);
+  ASSERT_TRUE(index.has_raw_value_size);
+  ASSERT_EQ(index.raw_value_size, value.size());
+  ASSERT_NE(index.file_number, legacy.file_number);
+  VerifyDB({{"key", value}});
+}
+
+#ifndef NDEBUG
+TEST_F(TitanDBTest, RawSizeBackfillReadError) {
+  Open();
+  std::string value(32768, 'a');
+  ASSERT_OK(db_->Put(WriteOptions(), "key", value));
+  Flush();
+  options_.enable_blob_index_raw_size = true;
+  Reopen();
+  SyncPoint::GetInstance()->SetCallBack(
+      "BlobDecoder::DecodeRecord",
+      [&](void* arg) { ++*reinterpret_cast<uint32_t*>(arg); });
+  SyncPoint::GetInstance()->EnableProcessing();
+  CompactRangeOptions compact;
+  compact.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  Status s = db_->CompactRange(compact, nullptr, nullptr);
+  SyncPoint::GetInstance()->DisableProcessing();
+  ASSERT_TRUE(s.IsCorruption()) << s.ToString();
+  Reopen();
+  VerifyDB({{"key", value}});
+  BlobIndex index;
+  ReadBlobIndex(db_, "key", &index);
+  ASSERT_FALSE(index.has_raw_value_size);
+  ASSERT_OK(db_->CompactRange(compact, nullptr, nullptr));
+  ReadBlobIndex(db_, "key", &index);
+  ASSERT_TRUE(index.has_raw_value_size);
+}
+#endif
+
 TEST_F(TitanDBTest, Open) {
   std::atomic<bool> checked_before_blob_file_set{false};
   std::atomic<bool> background_job_started{false};

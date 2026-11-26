@@ -113,14 +113,18 @@ bool operator==(const BlobHandle& lhs, const BlobHandle& rhs) {
 }
 
 void BlobIndex::EncodeTo(std::string* dst) const {
-  dst->push_back(kBlobRecord);
+  dst->push_back(has_raw_value_size ? kBlobRecordWithRawSize : kBlobRecord);
   PutVarint64(dst, file_number);
   blob_handle.EncodeTo(dst);
+  if (has_raw_value_size) PutVarint64(dst, raw_value_size);
 }
 
 Status BlobIndex::DecodeFrom(Slice* src) {
   unsigned char type;
-  if (!GetChar(src, &type) || type != kBlobRecord ||
+  has_raw_value_size = false;
+  raw_value_size = 0;
+  if (!GetChar(src, &type) ||
+      (type != kBlobRecord && type != kBlobRecordWithRawSize) ||
       !GetVarint64(src, &file_number)) {
     return Status::Corruption("BlobIndex");
   }
@@ -128,10 +132,18 @@ Status BlobIndex::DecodeFrom(Slice* src) {
   if (!s.ok()) {
     return Status::Corruption("BlobIndex", s.ToString());
   }
+  if (type == kBlobRecordWithRawSize) {
+    if (!GetVarint64(src, &raw_value_size)) {
+      return Status::Corruption("BlobIndex raw value size");
+    }
+    has_raw_value_size = true;
+  }
   return s;
 }
 
 bool operator==(const BlobIndex& lhs, const BlobIndex& rhs) {
+  // GC compares physical identity: backfilling size leaves the record
+  // unchanged.
   return (lhs.file_number == rhs.file_number &&
           lhs.blob_handle == rhs.blob_handle);
 }
