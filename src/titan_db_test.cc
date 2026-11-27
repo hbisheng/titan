@@ -8,7 +8,6 @@
 #include "db_impl.h"
 #include "db_iter.h"
 #include "file/filename.h"
-#include "memory/arena.h"
 #include "monitoring/statistics_impl.h"
 #include "options/cf_options.h"
 #include "port/port.h"
@@ -2561,24 +2560,13 @@ TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
   }
   auto properties = std::make_shared<TableProperties>();
   ASSERT_OK(collector.Finish(&properties->user_collected_properties));
-  Arena arena;
   unsigned destroyed = 0;
-  auto* arena_input = new (arena.AllocateAligned(sizeof(VectorIterator)))
-      VectorIterator(keys, values, &comparator);
-  arena_input->RegisterCleanup(
+  auto* input = new VectorIterator(keys, values, &comparator);
+  input->RegisterCleanup(
       [](void* count, void*) { ++*static_cast<unsigned*>(count); }, &destroyed,
       nullptr);
-  auto* arena_iter =
-      NewRawSizeIterator(arena_input, comparator, properties, &arena);
-  arena_iter->SeekToLast();
-  ASSERT_EQ(expected.back(), arena_iter->GetTitanBlobRawSize());
-  arena_iter->Prev();
-  ASSERT_EQ(expected[expected.size() - 2], arena_iter->GetTitanBlobRawSize());
-  arena_iter->~InternalIterator();
-  ASSERT_EQ(1, destroyed);
   std::unique_ptr<InternalIterator> iter(
-      NewRawSizeIterator(new VectorIterator(keys, values, &comparator),
-                         comparator, properties, nullptr));
+      NewRawSizeIterator(input, comparator, properties));
   properties.reset();  // Iterator must keep the property buffers alive.
   std::atomic<unsigned> steps{0};
   SyncPoint::GetInstance()->SetCallBack("RawSizeIterator::Locate:Next",
@@ -2595,9 +2583,6 @@ TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
       ASSERT_EQ(expected[j], iter->GetTitanBlobRawSize());
     }
     ASSERT_LE(steps, 128);
-    iter->SeekForPrev(keys[i]);
-    ASSERT_EQ(keys[i], iter->key());
-    ASSERT_EQ(expected[i], iter->GetTitanBlobRawSize());
   }
   steps = 0;
   iter->SeekToFirst();
@@ -2607,17 +2592,19 @@ TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
   }
   ASSERT_FALSE(iter->Valid());
   ASSERT_EQ(0, steps);  // Sequential compaction never walks an input twice.
+  iter.reset();
+  ASSERT_EQ(1, destroyed);
 
   auto empty = std::make_shared<TableProperties>();
   empty->user_collected_properties[kBlobRawSizesProperty] = "";
   auto* plain = new VectorIterator(keys, values, &comparator);
-  ASSERT_EQ(plain, NewRawSizeIterator(plain, comparator, empty, nullptr));
+  ASSERT_EQ(plain, NewRawSizeIterator(plain, comparator, empty));
   delete plain;
   auto bad = std::make_shared<TableProperties>();
   bad->user_collected_properties[kBlobRawSizesProperty] = std::string(8, '\0');
   bad->user_collected_properties[kBlobRawSizeAnchorsProperty] = "truncated";
   plain = new VectorIterator(keys, values, &comparator);
-  ASSERT_EQ(plain, NewRawSizeIterator(plain, comparator, bad, nullptr));
+  ASSERT_EQ(plain, NewRawSizeIterator(plain, comparator, bad));
   delete plain;
 }
 

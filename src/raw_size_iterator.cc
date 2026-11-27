@@ -3,7 +3,6 @@
 #include <algorithm>
 
 #include "blob_raw_size.h"
-#include "memory/arena.h"
 #include "test_util/sync_point.h"
 #include "util/coding.h"
 
@@ -20,19 +19,12 @@ class RawSizeIterator final : public InternalIterator {
   RawSizeIterator(InternalIterator* input,
                   const InternalKeyComparator& comparator,
                   std::shared_ptr<const TableProperties> properties,
-                  Slice sizes, std::vector<Anchor> anchors, bool in_arena)
+                  Slice sizes, std::vector<Anchor> anchors)
       : input_(input),
         comparator_(comparator),
         properties_(std::move(properties)),
         sizes_(sizes),
-        anchors_(std::move(anchors)),
-        in_arena_(in_arena) {}
-  ~RawSizeIterator() override {
-    if (in_arena_)
-      input_->~InternalIterator();
-    else
-      delete input_;
-  }
+        anchors_(std::move(anchors)) {}
   bool Valid() const override { return input_->Valid(); }
   Slice key() const override { return input_->key(); }
   Slice value() const override { return input_->value(); }
@@ -50,20 +42,13 @@ class RawSizeIterator final : public InternalIterator {
   }
   void Seek(const Slice& key) override {
     input_->Seek(key);
-    Reposition();
+    positioned_ = false;
+    Locate();
   }
-  void SeekForPrev(const Slice& key) override {
-    input_->SeekForPrev(key);
-    Reposition();
-  }
-  void SeekToLast() override {
-    input_->SeekToLast();
-    Reposition();
-  }
-  void Prev() override {
-    input_->Prev();
-    Reposition();
-  }
+  // CompactionMergingIterator only uses forward iteration.
+  void SeekForPrev(const Slice&) override { assert(false); }
+  void SeekToLast() override { assert(false); }
+  void Prev() override { assert(false); }
   void Next() override {
     if (positioned_ && IsBlob()) ++index_;
     input_->Next();
@@ -81,10 +66,6 @@ class RawSizeIterator final : public InternalIterator {
   bool IsBlob() const {
     return Valid() && input_->key().size() >= 8 &&
            ExtractValueType(input_->key()) == kTypeTitanBlobIndex;
-  }
-  void Reposition() {
-    positioned_ = false;
-    Locate();
   }
   void Locate() {
     // Inline entries require no array position. Resolve only on the first blob
@@ -117,12 +98,11 @@ class RawSizeIterator final : public InternalIterator {
     // data cursor or invent a size. The builder can backfill the unknown size.
     input_->Seek(target);
   }
-  InternalIterator* input_;
+  std::unique_ptr<InternalIterator> input_;
   const InternalKeyComparator& comparator_;
   std::shared_ptr<const TableProperties> properties_;
   Slice sizes_;
   std::vector<Anchor> anchors_;
-  bool in_arena_;
   uint64_t index_ = 0;
   bool positioned_ = false;
 };
@@ -130,7 +110,7 @@ class RawSizeIterator final : public InternalIterator {
 
 InternalIterator* NewRawSizeIterator(
     InternalIterator* input, const InternalKeyComparator& comparator,
-    std::shared_ptr<const TableProperties> properties, Arena* arena) {
+    std::shared_ptr<const TableProperties> properties) {
   if (!properties) return input;
   const auto& props = properties->user_collected_properties;
   auto sizes = props.find(kBlobRawSizesProperty);
@@ -159,13 +139,8 @@ InternalIterator* NewRawSizeIterator(
   }
   if (anchors.empty()) return input;
   TEST_SYNC_POINT("RawSizeIterator::Created");
-  if (arena) {
-    return new (arena->AllocateAligned(sizeof(RawSizeIterator)))
-        RawSizeIterator(input, comparator, std::move(properties), sizes->second,
-                        std::move(anchors), true);
-  }
   return new RawSizeIterator(input, comparator, std::move(properties),
-                             sizes->second, std::move(anchors), false);
+                             sizes->second, std::move(anchors));
 }
 }  // namespace titandb
 }  // namespace rocksdb
