@@ -146,11 +146,7 @@ void TitanTableBuilder::AddBase(const Slice& key,
 }
 
 uint64_t TitanTableBuilder::ResolveRawSize(const Slice& value) {
-  auto encoded = value.ToString();
-  for (const auto& input : input_raw_sizes_) {
-    auto entry = input->find(encoded);
-    if (entry != input->end()) return entry->second;
-  }
+  if (input_raw_size_ != kUnknownBlobRawSize) return input_raw_size_;
   uint64_t size;
   if (raw_sizes_ && raw_sizes_->Get(value, &size)) return size;
   BlobIndex index;

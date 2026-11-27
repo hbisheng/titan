@@ -32,7 +32,6 @@ class TitanTableBuilder : public TableBuilder {
     auto storage = blob_storage_.lock();
     if (storage && storage->raw_sizes()) {
       raw_sizes_ = storage->raw_sizes();
-      input_raw_sizes_ = raw_sizes_->Inputs();
     } else if (cf_options_.enable_blob_raw_size_properties) {
       // WAL references durable blob files even before the manifest opens.
       recovery_file_cache_.reset(
@@ -41,6 +40,12 @@ class TitanTableBuilder : public TableBuilder {
   }
 
   void Add(const Slice& key, const Slice& value) override;
+  void AddWithTitanBlobRawSize(const Slice& key, const Slice& value,
+                               uint64_t raw_size) override {
+    input_raw_size_ = raw_size;
+    Add(key, value);
+    input_raw_size_ = kUnknownBlobRawSize;
+  }
 
   Status status() const override;
 
@@ -96,7 +101,7 @@ class TitanTableBuilder : public TableBuilder {
   void DeleteUnfinishedBlobs();
 
   std::shared_ptr<BlobRawSizeState> raw_sizes_;
-  std::vector<std::shared_ptr<const BlobRawSizes>> input_raw_sizes_;
+  uint64_t input_raw_size_ = kUnknownBlobRawSize;
   Status status_;
   uint32_t cf_id_;
   TitanDBOptions db_options_;

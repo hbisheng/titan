@@ -2,10 +2,10 @@
 
 #include <atomic>
 
-#include "rocksdb/table.h"
-
 #include "blob_file_manager.h"
 #include "blob_file_set.h"
+#include "rocksdb/table.h"
+#include "table/internal_iterator.h"
 #include "titan/options.h"
 #include "titan_stats.h"
 
@@ -39,6 +39,11 @@ class TitanTableFactory : public TableFactory {
       std::unique_ptr<RandomAccessFileReader>&& file, uint64_t file_size,
       std::unique_ptr<TableReader>* result,
       bool prefetch_index_and_filter_in_cache = true) const override;
+
+  InternalIterator* WrapCompactionIterator(
+      InternalIterator* input, const InternalKeyComparator& comparator,
+      std::shared_ptr<const TableProperties> properties,
+      Arena* arena) const override;
 
   TableBuilder* NewTableBuilder(const TableBuilderOptions& options,
                                 WritableFileWriter* file) const override;

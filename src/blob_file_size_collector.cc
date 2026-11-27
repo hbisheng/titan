@@ -43,15 +43,25 @@ bool BlobFileSizeCollector::Decode(
   return true;
 }
 
-Status BlobFileSizeCollector::AddUserKey(const Slice& /* key */,
-                                         const Slice& value, EntryType type,
-                                         SequenceNumber /* seq */,
+Status BlobFileSizeCollector::AddUserKey(const Slice& key, const Slice& value,
+                                         EntryType type, SequenceNumber seq,
                                          uint64_t /* file_size */) {
+  // Range tombstones are in a separate block, outside the data iterator.
+  if (collect_raw_sizes_ && type != kEntryRangeDeletion) ++data_entries_;
   if (type != kEntryBlobIndex) {
     return Status::OK();
   }
 
   if (collect_raw_sizes_) {
+    // Anchor at the first blob after each 128 data entries. Any unanchored
+    // blob is then fewer than 128 entries from its preceding anchor, even
+    // when long stretches of inline values separate the blobs.
+    if (data_entries_ >= next_anchor_at_) {
+      InternalKey anchor(key, seq, kTypeTitanBlobIndex);
+      PutLengthPrefixedSlice(&raw_size_anchors_, anchor.Encode());
+      PutFixed64(&raw_size_anchors_, raw_sizes_.size() / sizeof(uint64_t));
+      next_anchor_at_ = data_entries_ + 128;
+    }
     uint64_t size = kUnknownBlobRawSize;
     GetCurrentBlobRawSize(&size);
     PutFixed64(&raw_sizes_, size);
@@ -73,11 +83,10 @@ Status BlobFileSizeCollector::AddUserKey(const Slice& /* key */,
 }
 
 Status BlobFileSizeCollector::Finish(UserCollectedProperties* properties) {
+  if (blob_files_size_.empty()) return Status::OK();
   if (collect_raw_sizes_) {
     properties->emplace(kBlobRawSizesProperty, raw_sizes_);
-  }
-  if (blob_files_size_.empty()) {
-    return Status::OK();
+    properties->emplace(kBlobRawSizeAnchorsProperty, raw_size_anchors_);
   }
 
   std::string res;

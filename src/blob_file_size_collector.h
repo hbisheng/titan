@@ -46,6 +46,9 @@ class BlobFileSizeCollector final : public TablePropertiesCollector {
  private:
   bool collect_raw_sizes_;
   std::string raw_sizes_;
+  std::string raw_size_anchors_;
+  uint64_t data_entries_ = 0;
+  uint64_t next_anchor_at_ = 0;
   std::map<uint64_t, uint64_t> blob_files_size_;
 };
 

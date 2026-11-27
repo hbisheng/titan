@@ -1,6 +1,7 @@
 #include "table_factory.h"
 
 #include "db_impl.h"
+#include "raw_size_iterator.h"
 #include "table_builder.h"
 
 namespace rocksdb {
@@ -14,6 +15,13 @@ Status TitanTableFactory::NewTableReader(
   return base_factory_->NewTableReader(ro, options, std::move(file), file_size,
                                        result,
                                        prefetch_index_and_filter_in_cache);
+}
+
+InternalIterator *TitanTableFactory::WrapCompactionIterator(
+    InternalIterator *input, const InternalKeyComparator &comparator,
+    std::shared_ptr<const TableProperties> properties, Arena *arena) const {
+  if (!cf_options_.enable_blob_raw_size_properties) return input;
+  return NewRawSizeIterator(input, comparator, std::move(properties), arena);
 }
 
 TableBuilder *TitanTableFactory::NewTableBuilder(
