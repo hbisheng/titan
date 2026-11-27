@@ -90,7 +90,7 @@ void TitanTableBuilder::Add(const Slice& key, const Slice& value) {
     if (!ok()) {
       return;
     }
-    auto storage = blob_storage_.lock();
+    auto storage = blob_storage_;
     assert(storage != nullptr);
     auto blob_file = storage->FindFile(index.file_number).lock();
     if (ShouldMerge(blob_file)) {
@@ -458,7 +458,7 @@ Status TitanTableBuilder::GetBlobRecord(const BlobIndex& index,
   auto it = input_file_prefetchers_.find(index.file_number);
   if (it == input_file_prefetchers_.end()) {
     std::unique_ptr<BlobFilePrefetcher> prefetcher;
-    auto storage = blob_storage_.lock();
+    auto storage = blob_storage_;
     if (storage) {
       s = storage->NewPrefetcher(index.file_number, &prefetcher);
     } else {

@@ -25,11 +25,11 @@ class TitanTableBuilder : public TableBuilder {
         cf_options_(cf_options),
         base_builder_(std::move(base_builder)),
         blob_manager_(blob_manager),
-        blob_storage_(blob_storage),
+        blob_storage_(blob_storage.lock()),
         stats_(stats),
         target_level_(target_level),
         merge_level_(merge_level) {
-    auto storage = blob_storage_.lock();
+    auto storage = blob_storage_;
     if (storage && storage->raw_sizes()) {
       raw_sizes_ = storage->raw_sizes();
     } else if (cf_options_.enable_blob_raw_size_properties) {
@@ -110,7 +110,8 @@ class TitanTableBuilder : public TableBuilder {
   std::unique_ptr<BlobFileHandle> blob_handle_;
   std::shared_ptr<BlobFileManager> blob_manager_;
   std::unique_ptr<BlobFileBuilder> blob_builder_;
-  std::weak_ptr<BlobStorage> blob_storage_;
+  // A dropped CF can still have a builder completing its current entry.
+  std::shared_ptr<BlobStorage> blob_storage_;
   std::vector<
       std::pair<std::shared_ptr<BlobFileMeta>, std::unique_ptr<BlobFileHandle>>>
       finished_blobs_;
