@@ -1,11 +1,11 @@
 #include <cinttypes>
 
-#include "file/filename.h"
-#include "test_util/testharness.h"
-
 #include "blob_file_builder.h"
 #include "blob_file_cache.h"
 #include "blob_file_reader.h"
+#include "file/filename.h"
+#include "test_util/testharness.h"
+#include "test_util/testutil.h"
 
 namespace rocksdb {
 namespace titandb {
@@ -210,6 +210,40 @@ TEST_F(BlobFileTest, BlobFileReader) {
   TestBlobFileReader(options, BlobFileHeader::kVersion1);
   options.blob_file_compression = kLZ4Compression;
   TestBlobFileReader(options);
+}
+
+TEST_F(BlobFileTest, MissingDictionaryIsCorruptionAndClosesFile) {
+  std::string data;
+  BlobFileHeader header;
+  header.flags = BlobFileHeader::kHasUncompressionDictionary;
+  header.EncodeTo(&data);
+  MetaIndexBuilder meta;
+  const auto block = meta.Finish();  // File claims a dictionary, but has none.
+  BlobFileFooter footer;
+  footer.meta_index_handle.set_offset(data.size());
+  footer.meta_index_handle.set_size(block.size());
+  data.append(block.data(), block.size());
+  footer.EncodeTo(&data);
+
+  class TrackedFile : public test::StringSource {
+   public:
+    TrackedFile(const Slice& data, bool* closed)
+        : StringSource(data), closed_(closed) {}
+    ~TrackedFile() override { *closed_ = true; }
+
+   private:
+    bool* closed_;
+  };
+  bool closed = false;
+  std::unique_ptr<FSRandomAccessFile> file(new TrackedFile(data, &closed));
+  std::unique_ptr<RandomAccessFileReader> input(
+      new RandomAccessFileReader(std::move(file), "missing-dictionary"));
+  std::unique_ptr<BlobFileReader> reader;
+  auto status = BlobFileReader::Open(TitanCFOptions(), std::move(input),
+                                     data.size(), &reader, nullptr);
+  EXPECT_TRUE(status.IsCorruption()) << status.ToString();
+  EXPECT_EQ(nullptr, reader);
+  EXPECT_TRUE(closed);
 }
 
 TEST_F(BlobFileTest, BlobFilePrefetcher) {

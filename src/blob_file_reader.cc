@@ -97,7 +97,8 @@ Status BlobFileReader::Open(const TitanCFOptions& options,
     return s;
   }
 
-  auto reader = new BlobFileReader(options, std::move(file), stats);
+  std::unique_ptr<BlobFileReader> reader(
+      new BlobFileReader(options, std::move(file), stats));
   reader->footer_ = footer;
   if (header.flags & BlobFileHeader::kHasUncompressionDictionary) {
     s = InitUncompressionDict(footer, reader->file_.get(),
@@ -107,7 +108,7 @@ Status BlobFileReader::Open(const TitanCFOptions& options,
       return s;
     }
   }
-  result->reset(reader);
+  *result = std::move(reader);
   return Status::OK();
 }
 
@@ -220,7 +221,7 @@ Status InitUncompressionDict(
   }
 
   if (!dict_is_found) {
-    return Status::NotFound("uncompression dict");
+    return Status::Corruption("missing uncompression dict");
   }
 
   Slice dict_slice;

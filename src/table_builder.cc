@@ -104,7 +104,7 @@ void TitanTableBuilder::Add(const Slice& key, const Slice& value) {
         gc_num_keys_relocated_++;
         gc_bytes_relocated_ += record.value.size();
         AddBlob(ikey, record.value);
-        if (ok()) return;
+        return;
       } else {
         ++error_read_cnt_;
         TITAN_LOG_DEBUG(db_options_.info_log,

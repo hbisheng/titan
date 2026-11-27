@@ -2545,27 +2545,44 @@ TEST_F(RawSizePropertiesTest, RotatedBlobFinishErrorIsPreserved) {
   };
   auto fs = std::make_shared<FailBlobAppendFS>(env_->GetFileSystem());
   auto fault_env = NewCompositeEnv(fs);
-  options_.env = fault_env.get();
-  options_.min_blob_size = 65536;
-  Open();
-  Seed();  // Keep the original values inline and readable if compaction fails.
-  options_.min_blob_size = 32;
-  options_.blob_file_target_size = 1;
-  Reopen();
-  std::vector<LiveFileMetaData> before, after;
-  db_->GetLiveFilesMetaData(&before);
-  std::vector<std::string> inputs;
-  for (const auto& file : before) inputs.push_back(file.name);
-  fs->fail = true;  // Fail the first blob's flush during output rotation.
-  auto status = db_->CompactFiles(CompactionOptions(), inputs, 6);
-  db_->GetLiveFilesMetaData(&after);
-  VerifyLive();
-  Close();  // Keep the borrowed Env alive until the DB is closed.
-  ASSERT_FALSE(fs->fail);
-  ASSERT_TRUE(status.IsIOError()) << status.ToString();
-  ASSERT_EQ(before.size(), after.size());
-  for (size_t i = 0; i < before.size(); ++i)
-    ASSERT_EQ(before[i].name, after[i].name);
+  const auto initial_options = options_;
+  for (bool legacy_input : {false, true}) {
+    SCOPED_TRACE(legacy_input);
+    options_ = initial_options;
+    options_.env = fault_env.get();
+    options_.enable_blob_raw_size_properties = !legacy_input;
+    options_.min_blob_size = legacy_input ? 32 : 65536;
+    Open();
+    Seed();  // Exercise both inline inputs and legacy indices without raw
+             // sizes.
+    options_.min_blob_size = 32;
+    options_.enable_blob_raw_size_properties = true;
+    options_.level_merge = legacy_input;
+    options_.level_compaction_dynamic_level_bytes = legacy_input;
+    if (legacy_input) {
+      options_.blob_file_compression = kZSTD;
+      options_.blob_file_compression_options.max_dict_bytes = 4096;
+      options_.blob_file_compression_options.zstd_max_train_bytes = 16384;
+    }
+    options_.blob_file_target_size = legacy_input ? 128 : 1;
+    Reopen();
+    std::vector<LiveFileMetaData> before, after;
+    db_->GetLiveFilesMetaData(&before);
+    std::vector<std::string> inputs;
+    for (const auto& file : before) inputs.push_back(file.name);
+    fs->fail = true;  // Fail the first blob's flush during output rotation.
+    auto status = db_->CompactFiles(CompactionOptions(), inputs, 6);
+    db_->GetLiveFilesMetaData(&after);
+    VerifyLive();
+    Close();  // Keep the borrowed Env alive until the DB is closed.
+    ASSERT_FALSE(fs->fail);
+    ASSERT_TRUE(status.IsIOError()) << status.ToString();
+    ASSERT_EQ(before.size(), after.size());
+    for (size_t i = 0; i < before.size(); ++i)
+      ASSERT_EQ(before[i].name, after[i].name);
+    DeleteDir(env_, options_.dirname);
+    DeleteDir(env_, dbname_);
+  }
 }
 
 TEST_F(RawSizePropertiesTest, UnknownLiveEntryIsRetried) {
