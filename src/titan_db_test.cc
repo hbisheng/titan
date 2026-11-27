@@ -2588,7 +2588,7 @@ TEST_F(RawSizePropertiesTest, CorruptLegacyBlobFailsCompaction) {
   VerifyLive();
 }
 
-TEST_F(RawSizePropertiesTest, RotatedBlobFinishErrorIsPreserved) {
+TEST_F(RawSizePropertiesTest, BlobWriteErrorIsPreserved) {
   class FailBlobAppendFS : public FileSystemWrapper {
    public:
     explicit FailBlobAppendFS(const std::shared_ptr<FileSystem>& fs)
@@ -2609,7 +2609,7 @@ TEST_F(RawSizePropertiesTest, RotatedBlobFinishErrorIsPreserved) {
                           IODebugContext* dbg) override {
             if (*fail_) {
               *fail_ = false;
-              return IOStatus::IOError("injected blob finish error");
+              return IOStatus::IOError("injected blob write error");
             }
             return target()->Append(data, options, dbg);
           }
@@ -2626,17 +2626,35 @@ TEST_F(RawSizePropertiesTest, RotatedBlobFinishErrorIsPreserved) {
   auto fs = std::make_shared<FailBlobAppendFS>(env_->GetFileSystem());
   auto fault_env = NewCompositeEnv(fs);
   const auto initial_options = options_;
-  for (bool legacy_input : {false, true}) {
+  struct TestCase {
+    bool legacy_input;
+    bool rotate;
+    bool raw_sizes;
+  };
+  const TestCase cases[] = {{false, true, true}, {true, true, true},
+                            {false, false, true}, {false, false, false}};
+  for (const auto& test : cases) {
+    const bool legacy_input = test.legacy_input;
     SCOPED_TRACE(legacy_input);
+    SCOPED_TRACE(test.rotate);
+    SCOPED_TRACE(test.raw_sizes);
     options_ = initial_options;
     options_.env = fault_env.get();
-    options_.enable_blob_raw_size_properties = !legacy_input;
-    options_.min_blob_size = legacy_input ? 32 : 65536;
+    options_.enable_blob_raw_size_properties = test.raw_sizes && !legacy_input;
+    options_.min_blob_size = legacy_input ? 32 : (1 << 20);
+    if (!test.rotate) options_.blob_file_compression = kNoCompression;
     Open();
-    Seed();  // Exercise both inline inputs and legacy indices without raw
-             // sizes.
+    // Large uncompressed values force Append during Add, before file rotation.
+    const auto value = [&](int i) {
+      return test.rotate ? Value(i) : std::string(100000 + i, 'a' + i % 20);
+    };
+    for (int batch = 0; batch < 3; ++batch) {
+      for (int i = batch * 32; i < (batch + 1) * 32; ++i)
+        ASSERT_OK(db_->Put(WriteOptions(), GenKey(i), value(i)));
+      Flush();
+    }
     options_.min_blob_size = 32;
-    options_.enable_blob_raw_size_properties = true;
+    options_.enable_blob_raw_size_properties = test.raw_sizes;
     options_.level_merge = legacy_input;
     options_.level_compaction_dynamic_level_bytes = legacy_input;
     if (legacy_input) {
@@ -2644,16 +2662,21 @@ TEST_F(RawSizePropertiesTest, RotatedBlobFinishErrorIsPreserved) {
       options_.blob_file_compression_options.max_dict_bytes = 4096;
       options_.blob_file_compression_options.zstd_max_train_bytes = 16384;
     }
-    options_.blob_file_target_size = legacy_input ? 128 : 1;
+    options_.blob_file_target_size = test.rotate ? (legacy_input ? 128 : 1)
+                                                : (1ULL << 30);
     Reopen();
     std::vector<LiveFileMetaData> before, after;
     db_->GetLiveFilesMetaData(&before);
     std::vector<std::string> inputs;
     for (const auto& file : before) inputs.push_back(file.name);
-    fs->fail = true;  // Fail the first blob's flush during output rotation.
+    fs->fail = true;  // Fail either Add-time Append or the rotation-time flush.
     auto status = db_->CompactFiles(CompactionOptions(), inputs, 6);
     db_->GetLiveFilesMetaData(&after);
-    VerifyLive();
+    for (int i = 0; i < 96; ++i) {
+      std::string actual;
+      EXPECT_OK(db_->Get(ReadOptions(), GenKey(i), &actual));
+      EXPECT_EQ(value(i), actual);
+    }
     Close();  // Keep the borrowed Env alive until the DB is closed.
     ASSERT_FALSE(fs->fail);
     ASSERT_TRUE(status.IsIOError()) << status.ToString();

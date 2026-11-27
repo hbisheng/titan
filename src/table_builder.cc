@@ -358,6 +358,8 @@ Status TitanTableBuilder::Finish() {
 }
 
 void TitanTableBuilder::Abandon() {
+  // Preserve errors owned by builders before cleanup destroys them.
+  status_ = status();
   base_builder_->Abandon();
   DeleteUnfinishedBlobs();
 }
