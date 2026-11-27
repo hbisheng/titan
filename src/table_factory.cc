@@ -18,12 +18,12 @@ Status TitanTableFactory::NewTableReader(
 }
 
 InternalIterator *TitanTableFactory::WrapCompactionIterator(
-    InternalIterator *input, const InternalKeyComparator &comparator,
+    InternalIterator *input, const InternalKeyComparator & /* comparator */,
     std::shared_ptr<const TableProperties> properties, Arena *arena) const {
   // Current compaction inputs are heap allocated. Keep other allocation
   // modes unwrapped; the builder can still backfill missing sizes.
   if (!cf_options_.enable_blob_raw_size_properties || arena) return input;
-  return NewRawSizeIterator(input, comparator, std::move(properties));
+  return NewRawSizeIterator(input, std::move(properties));
 }
 
 TableBuilder *TitanTableFactory::NewTableBuilder(

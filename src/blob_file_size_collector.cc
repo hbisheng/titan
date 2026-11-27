@@ -1,5 +1,8 @@
 #include "blob_file_size_collector.h"
 
+#include <algorithm>
+#include <tuple>
+
 #include "base_db_listener.h"
 
 namespace rocksdb {
@@ -43,33 +46,20 @@ bool BlobFileSizeCollector::Decode(
   return true;
 }
 
-Status BlobFileSizeCollector::AddUserKey(const Slice& key, const Slice& value,
-                                         EntryType type, SequenceNumber seq,
+Status BlobFileSizeCollector::AddUserKey(const Slice& /* key */,
+                                         const Slice& value, EntryType type,
+                                         SequenceNumber /* seq */,
                                          uint64_t /* file_size */) {
-  // Range tombstones are in a separate block, outside the data iterator.
-  if (collect_raw_sizes_ && type != kEntryRangeDeletion) ++data_entries_;
-  if (type != kEntryBlobIndex) {
-    return Status::OK();
-  }
-
-  if (collect_raw_sizes_) {
-    // Anchor at the first blob after each 128 data entries. Any unanchored
-    // blob is then fewer than 128 entries from its preceding anchor, even
-    // when long stretches of inline values separate the blobs.
-    if (data_entries_ >= next_anchor_at_) {
-      InternalKey anchor(key, seq, kTypeTitanBlobIndex);
-      PutLengthPrefixedSlice(&raw_size_anchors_, anchor.Encode());
-      PutFixed64(&raw_size_anchors_, raw_sizes_.size() / sizeof(uint64_t));
-      next_anchor_at_ = data_entries_ + 128;
-    }
-    uint64_t size = kUnknownBlobRawSize;
-    GetCurrentBlobRawSize(&size);
-    PutFixed64(&raw_sizes_, size);
-  }
+  if (type != kEntryBlobIndex) return Status::OK();
   BlobIndex index;
-  auto s = index.DecodeFrom(const_cast<Slice*>(&value));
-  if (!s.ok()) {
-    return s;
+  Slice encoded = value;
+  auto s = index.DecodeFrom(&encoded);
+  if (!s.ok()) return s;
+  if (collect_raw_sizes_) {
+    uint64_t raw_size = kUnknownBlobRawSize;
+    GetCurrentBlobRawSize(&raw_size);
+    raw_sizes_.push_back(
+        {index.file_number, index.blob_handle.offset, raw_size});
   }
 
   auto iter = blob_files_size_.find(index.file_number);
@@ -85,8 +75,20 @@ Status BlobFileSizeCollector::AddUserKey(const Slice& key, const Slice& value,
 Status BlobFileSizeCollector::Finish(UserCollectedProperties* properties) {
   if (blob_files_size_.empty()) return Status::OK();
   if (collect_raw_sizes_) {
-    properties->emplace(kBlobRawSizesProperty, raw_sizes_);
-    properties->emplace(kBlobRawSizeAnchorsProperty, raw_size_anchors_);
+    // Known sizes sort before unknown ones for duplicate addresses.
+    std::sort(raw_sizes_.begin(), raw_sizes_.end(),
+              [](const auto& a, const auto& b) {
+                return std::tie(a.file_number, a.offset, a.raw_size) <
+                       std::tie(b.file_number, b.offset, b.raw_size);
+              });
+    std::string encoded;
+    encoded.reserve(raw_sizes_.size() * kBlobRawSizeEntrySize);
+    for (const auto& entry : raw_sizes_) {
+      PutFixed64(&encoded, entry.file_number);
+      PutFixed64(&encoded, entry.offset);
+      PutFixed64(&encoded, entry.raw_size);
+    }
+    properties->emplace(kBlobRawSizesProperty, std::move(encoded));
   }
 
   std::string res;

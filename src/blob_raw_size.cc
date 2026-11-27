@@ -6,8 +6,7 @@
 namespace rocksdb {
 namespace titandb {
 
-const char kBlobRawSizesProperty[] = "TitanDB.blob_raw_sizes.v1";
-const char kBlobRawSizeAnchorsProperty[] = "TitanDB.blob_raw_size_anchors.v1";
+const char kBlobRawSizesProperty[] = "TitanDB.blob_raw_sizes_by_address.v1";
 static thread_local const uint64_t* current_raw_size = nullptr;
 
 bool GetCurrentBlobRawSize(uint64_t* size) {

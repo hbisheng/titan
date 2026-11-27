@@ -7,7 +7,8 @@ namespace rocksdb {
 namespace titandb {
 
 extern const char kBlobRawSizesProperty[];
-extern const char kBlobRawSizeAnchorsProperty[];
+// Each sorted entry encodes file number, offset, and raw size as fixed64.
+constexpr size_t kBlobRawSizeEntrySize = 24;
 
 class BlobRawSizeScope {
  public:

@@ -2293,16 +2293,17 @@ class RawSizePropertiesTest : public TitanDBTest {
         continue;
       }
       Slice array(entry->second);
-      EXPECT_EQ(0, array.size() % 8);
-      while (array.size() >= 8) {
-        sizes.push_back(DecodeFixed64(array.data()));
-        array.remove_prefix(8);
+      EXPECT_EQ(0, array.size() % kBlobRawSizeEntrySize);
+      while (array.size() >= kBlobRawSizeEntrySize) {
+        sizes.push_back(DecodeFixed64(array.data() + 16));
+        array.remove_prefix(kBlobRawSizeEntrySize);
       }
     }
     return sizes;
   }
   void CheckSingleOutput() {
     auto sizes = Sizes();
+    std::sort(sizes.begin(), sizes.end());
     ASSERT_EQ(96, sizes.size());
     for (int i = 0; i < 96; ++i) ASSERT_EQ(Value(i).size(), sizes[i]);
     VerifyLive();
@@ -2524,14 +2525,14 @@ TEST_F(RawSizePropertiesTest, PlainSSTHasNoRawSizeWork) {
   for (const auto& table : tables) {
     const auto& props = table.second->user_collected_properties;
     ASSERT_EQ(0, props.count(kBlobRawSizesProperty));
-    ASSERT_EQ(0, props.count(kBlobRawSizeAnchorsProperty));
+    ASSERT_EQ(0, props.count("TitanDB.blob_raw_size_anchors.v1"));
   }
   ASSERT_EQ(0, adapters);
   ASSERT_EQ(0, reads_);
   VerifyLive();
 }
 
-TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
+TEST_F(RawSizePropertiesTest, AddressLookupAndLegacyArray) {
   InternalKeyComparator comparator(BytewiseComparator());
   std::vector<std::string> keys, values;
   std::vector<uint64_t> expected;
@@ -2544,15 +2545,22 @@ TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
       std::string value = "inline";
       if (blob) {
         BlobIndex index;
-        index.file_number = 1;
-        index.blob_handle.offset = i * 100 + seq;
+        const uint64_t files[] = {1, 255, 256, 65536, UINT64_MAX - 1};
+        index.file_number = files[i % 5];
+        index.blob_handle.offset = i == 0 ? 42 : (3000 - i) * 100 + seq;
+        if (i == 0) raw_size = seq == 2 ? kUnknownBlobRawSize : 0;
         index.blob_handle.size = 30;
         value.clear();
         index.EncodeTo(&value);
       }
       keys.push_back(key.Encode().ToString());
       values.push_back(value);
-      expected.push_back(raw_size);
+      expected.push_back(i == 0 ? 0 : raw_size);
+      // Exercise absent addresses both inside and after the table's range.
+      if (i == 300 && seq == 2) {
+        expected.back() = kUnknownBlobRawSize;
+        continue;
+      }
       BlobRawSizeScope scope(&raw_size);
       ASSERT_OK(collector.AddUserKey(
           GenKey(i), value, blob ? kEntryBlobIndex : kEntryPut, seq, 0));
@@ -2565,14 +2573,19 @@ TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
   input->RegisterCleanup(
       [](void* count, void*) { ++*static_cast<unsigned*>(count); }, &destroyed,
       nullptr);
-  std::unique_ptr<InternalIterator> iter(
-      NewRawSizeIterator(input, comparator, properties));
+  std::unique_ptr<InternalIterator> iter(NewRawSizeIterator(input, properties));
+  BlobIndex absent;
+  absent.file_number = UINT64_MAX;
+  std::string encoded_absent;
+  absent.EncodeTo(&encoded_absent);
+  std::unique_ptr<InternalIterator> missing(NewRawSizeIterator(
+      new VectorIterator({keys.front()}, {encoded_absent}, &comparator),
+      properties));
+  missing->SeekToFirst();
+  ASSERT_EQ(kUnknownBlobRawSize, missing->GetTitanBlobRawSize());
+  missing.reset();
   properties.reset();  // Iterator must keep the property buffers alive.
-  std::atomic<unsigned> steps{0};
-  SyncPoint::GetInstance()->SetCallBack("RawSizeIterator::Locate:Next",
-                                        [&](void*) { ++steps; });
   for (size_t i : {0u, 59u, 799u, 2400u, 4223u, 5998u}) {
-    steps = 0;
     iter->Seek(keys[i]);
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ(keys[i], iter->key());
@@ -2582,29 +2595,26 @@ TEST_F(RawSizePropertiesTest, PositionalSeekAndLegacyEmptyArray) {
       ASSERT_EQ(keys[j], iter->key());
       ASSERT_EQ(expected[j], iter->GetTitanBlobRawSize());
     }
-    ASSERT_LE(steps, 128);
   }
-  steps = 0;
   iter->SeekToFirst();
   for (size_t i = 0; i < keys.size(); ++i, iter->Next()) {
     ASSERT_EQ(keys[i], iter->key());
     ASSERT_EQ(expected[i], iter->GetTitanBlobRawSize());
   }
   ASSERT_FALSE(iter->Valid());
-  ASSERT_EQ(0, steps);  // Sequential compaction never walks an input twice.
   iter.reset();
   ASSERT_EQ(1, destroyed);
 
-  auto empty = std::make_shared<TableProperties>();
-  empty->user_collected_properties[kBlobRawSizesProperty] = "";
+  auto legacy = std::make_shared<TableProperties>();
+  legacy->user_collected_properties["TitanDB.blob_raw_sizes.v1"] =
+      std::string(24, 'x');
   auto* plain = new VectorIterator(keys, values, &comparator);
-  ASSERT_EQ(plain, NewRawSizeIterator(plain, comparator, empty));
+  ASSERT_EQ(plain, NewRawSizeIterator(plain, legacy));
   delete plain;
   auto bad = std::make_shared<TableProperties>();
   bad->user_collected_properties[kBlobRawSizesProperty] = std::string(8, '\0');
-  bad->user_collected_properties[kBlobRawSizeAnchorsProperty] = "truncated";
   plain = new VectorIterator(keys, values, &comparator);
-  ASSERT_EQ(plain, NewRawSizeIterator(plain, comparator, bad));
+  ASSERT_EQ(plain, NewRawSizeIterator(plain, bad));
   delete plain;
 }
 
@@ -2662,7 +2672,7 @@ class RawSizeSkipFilter : public CompactionFilter {
   }
 };
 
-TEST_F(RawSizePropertiesTest, FilterSkipKeepsArrayPosition) {
+TEST_F(RawSizePropertiesTest, FilterSkipKeepsRawSizes) {
   RawSizeSkipFilter filter;
   filter.skip_until = GenKey(600);
   options_.compaction_filter = &filter;
