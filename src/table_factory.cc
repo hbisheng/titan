@@ -24,7 +24,17 @@ TableBuilder *TitanTableFactory::NewTableBuilder(
   // opened yet, then it would write to the uninitialized manifest writer. So do
   // not enable titan table builder now.
   if (!blob_file_set_->IsOpened()) {
-    return base_builder.release();
+    if (!cf_options_.enable_blob_raw_size_properties)
+      return base_builder.release();
+    // Recovery flush can run before blob metadata opens. Keep values and
+    // indices unchanged; the builder can read durable blobs without a manifest
+    // lookup.
+    auto recovery_options = cf_options_;
+    recovery_options.blob_run_mode = TitanBlobRunMode::kReadOnly;
+    return new TitanTableBuilder(options.column_family_id, db_options_,
+                                 recovery_options, std::move(base_builder),
+                                 blob_manager_, {}, stats_, 0,
+                                 options.level_at_creation);
   }
   TitanCFOptions cf_options = cf_options_;
   cf_options.UpdateMutableOptions(mutable_cf_options_);

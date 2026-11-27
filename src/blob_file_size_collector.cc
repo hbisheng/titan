@@ -8,7 +8,7 @@ namespace titandb {
 TablePropertiesCollector*
 BlobFileSizeCollectorFactory::CreateTablePropertiesCollector(
     rocksdb::TablePropertiesCollectorFactory::Context /* context */) {
-  return new BlobFileSizeCollector();
+  return new BlobFileSizeCollector(raw_sizes_);
 }
 
 const std::string BlobFileSizeCollector::kPropertiesName =
@@ -51,6 +51,11 @@ Status BlobFileSizeCollector::AddUserKey(const Slice& /* key */,
     return Status::OK();
   }
 
+  if (collect_raw_sizes_) {
+    uint64_t size = kUnknownBlobRawSize;
+    GetCurrentBlobRawSize(&size);
+    PutFixed64(&raw_sizes_, size);
+  }
   BlobIndex index;
   auto s = index.DecodeFrom(const_cast<Slice*>(&value));
   if (!s.ok()) {
@@ -68,6 +73,9 @@ Status BlobFileSizeCollector::AddUserKey(const Slice& /* key */,
 }
 
 Status BlobFileSizeCollector::Finish(UserCollectedProperties* properties) {
+  if (collect_raw_sizes_) {
+    properties->emplace(kBlobRawSizesProperty, raw_sizes_);
+  }
   if (blob_files_size_.empty()) {
     return Status::OK();
   }

@@ -2240,6 +2240,273 @@ TEST_F(TitanDBTest, OnlineChangeBlobFileDiscardableRatio) {
   // The discardable ratio should be updated after GC.
   ASSERT_LT(blob_file->second.lock()->GetDiscardableRatio(), 0.4);
 }
+class RawSizePropertiesTest : public TitanDBTest {
+ public:
+  RawSizePropertiesTest() {
+    options_.enable_blob_raw_size_properties = true;
+    options_.level_merge = false;
+    options_.range_merge = false;
+    options_.avoid_flush_during_shutdown = true;
+    options_.avoid_flush_during_recovery = true;
+    options_.purge_obsolete_files_period_sec = 0;
+    SyncPoint::GetInstance()->SetCallBack(
+        "TitanTableBuilder::ResolveRawSize:ReadBlob", [&](void*) { ++reads_; });
+    SyncPoint::GetInstance()->EnableProcessing();
+  }
+  void Seed() {
+    for (int batch = 0; batch < 3; ++batch) {
+      for (int i = batch * 32; i < (batch + 1) * 32; ++i) {
+        ASSERT_OK(db_->Put(WriteOptions(), GenKey(i), Value(i)));
+      }
+      Flush();
+    }
+  }
+  std::string Value(int i) { return std::string(1024 + i, 'a' + i % 20); }
+  void GC() {
+    ASSERT_OK(db_impl_->TEST_StartGC(db_->DefaultColumnFamily()->GetID()));
+  }
+  void VerifyLive() {
+    for (int i = 0; i < 96; ++i) {
+      std::string value;
+      ASSERT_OK(db_->Get(ReadOptions(), GenKey(i), &value));
+      ASSERT_EQ(Value(i), value);
+    }
+  }
+  void CompactFiles() {
+    TablePropertiesCollection tables;
+    ASSERT_OK(db_->GetPropertiesOfAllTables(&tables));
+    std::vector<std::string> files;
+    for (const auto& table : tables) files.push_back(table.first);
+    ASSERT_OK(db_->CompactFiles(CompactionOptions(), files, 6));
+  }
+  std::vector<uint64_t> Sizes() {
+    TablePropertiesCollection tables;
+    EXPECT_OK(db_->GetPropertiesOfAllTables(&tables));
+    std::vector<uint64_t> sizes;
+    for (const auto& table : tables) {
+      auto entry =
+          table.second->user_collected_properties.find(kBlobRawSizesProperty);
+      EXPECT_NE(entry, table.second->user_collected_properties.end());
+      if (entry == table.second->user_collected_properties.end()) continue;
+      Slice array(entry->second);
+      EXPECT_EQ(0, array.size() % 8);
+      while (array.size() >= 8) {
+        sizes.push_back(DecodeFixed64(array.data()));
+        array.remove_prefix(8);
+      }
+    }
+    return sizes;
+  }
+  void CheckSingleOutput() {
+    auto sizes = Sizes();
+    ASSERT_EQ(96, sizes.size());
+    for (int i = 0; i < 96; ++i) ASSERT_EQ(Value(i).size(), sizes[i]);
+    VerifyLive();
+  }
+  std::atomic<uint64_t> reads_{0};
+};
+
+TEST_F(RawSizePropertiesTest, FlushAndCompactionReuse) {
+  options_.blob_file_compression = kZSTD;
+  options_.blob_file_compression_options.max_dict_bytes = 4096;
+  options_.blob_file_compression_options.zstd_max_train_bytes = 16384;
+  Open();
+  Seed();
+  ASSERT_EQ(0, reads_);
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_EQ(0, reads_);
+  // Discard every in-memory size, then force a bottommost rewrite.
+  Reopen();
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_EQ(0, reads_);
+  CompactFiles();
+  CheckSingleOutput();
+  ASSERT_EQ(0, reads_);
+  uint64_t size;
+  ASSERT_FALSE(GetCurrentBlobRawSize(&size));
+}
+
+TEST_F(RawSizePropertiesTest, LegacyBackfillAndDowngrade) {
+  options_.enable_blob_raw_size_properties = false;
+  Open();
+  Seed();
+  CompactAll();  // Legacy SST is already at bottommost.
+  options_.enable_blob_raw_size_properties = true;
+  Reopen();
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_EQ(96, reads_);
+  reads_ = 0;
+  CompactAll();
+  ASSERT_EQ(0, reads_);
+  // Old-format writer ignores the new property, then drops it on rewrite.
+  options_.enable_blob_raw_size_properties = false;
+  Reopen();
+  VerifyLive();
+  CompactAll();
+  options_.enable_blob_raw_size_properties = true;
+  Reopen();
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_EQ(96, reads_);
+}
+
+TEST_F(RawSizePropertiesTest, GCCacheHitEvictionAndWALRecovery) {
+  Open();
+  Seed();
+  GC();
+  Flush();
+  ASSERT_EQ(0, reads_);  // GC supplied lengths; no reread at flush.
+  Seed();                // Supply multiple eligible files for the next GC.
+  GC();
+  GetBlobStorage().lock()->raw_sizes()->cache->SetCapacity(0);
+  Flush();
+  ASSERT_GT(reads_, 0);
+  CompactAll();
+  CheckSingleOutput();
+  Seed();
+  GC();
+  reads_ = 0;
+  Reopen();  // GC memtable is recovered from an unchanged legacy WAL.
+  VerifyLive();
+  Flush();
+  ASSERT_GT(reads_, 0);
+  CompactAll();
+  CheckSingleOutput();
+}
+
+TEST_F(RawSizePropertiesTest, RecoveryFlushReadsDurableBlobs) {
+  Open();
+  Seed();
+  GC();
+  options_.avoid_flush_during_recovery = false;
+  Reopen();  // Base DB flushes before Titan's blob manifest opens.
+  VerifyLive();
+  auto sizes = Sizes();
+  ASSERT_EQ(sizes.end(),
+            std::find(sizes.begin(), sizes.end(), kUnknownBlobRawSize));
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_GT(reads_, 0);
+}
+
+TEST_F(RawSizePropertiesTest, EmptyBlobIsKnown) {
+  options_.min_blob_size = 0;
+  Open();
+  ASSERT_OK(db_->Put(WriteOptions(), "a", ""));
+  Flush();
+  ASSERT_EQ((std::vector<uint64_t>{0}), Sizes());
+  Reopen();
+  CompactAll();
+  ASSERT_EQ((std::vector<uint64_t>{0}), Sizes());
+  ASSERT_EQ(0, reads_);
+}
+
+TEST_F(RawSizePropertiesTest, InternalVersionsAndMixedEntries) {
+  options_.min_blob_size = 32;
+  Open();
+  ASSERT_OK(db_->Put(WriteOptions(), "a", std::string(101, 'x')));
+  auto snapshot = db_->GetSnapshot();
+  ASSERT_OK(db_->Put(WriteOptions(), "a", std::string(203, 'y')));
+  ASSERT_OK(db_->Put(WriteOptions(), "b", "inline"));
+  ASSERT_OK(db_->Put(WriteOptions(), "c", std::string(307, 'z')));
+  Flush();
+  ASSERT_EQ((std::vector<uint64_t>{203, 101, 307}), Sizes());
+  CompactAll();
+  ASSERT_EQ((std::vector<uint64_t>{203, 101, 307}), Sizes());
+  db_->ReleaseSnapshot(snapshot);
+  CompactAll();
+  ASSERT_EQ((std::vector<uint64_t>{203, 307}), Sizes());
+  ASSERT_EQ(0, reads_);
+}
+
+TEST_F(RawSizePropertiesTest, ReclaimedLegacyBlobStaysUnknown) {
+  options_.enable_blob_raw_size_properties = false;
+  Open();
+  Seed();
+  options_.enable_blob_raw_size_properties = true;
+  Reopen();
+  GC();  // Legacy SSTs still refer to A; new indices are in the memtable.
+  ASSERT_OK(db_->Put(WriteOptions(), "advance-sequence", "inline"));
+  ASSERT_OK(db_impl_->TEST_PurgeObsoleteFiles());
+  CompactFiles();  // Explicit SST-only compaction excludes the memtable.
+  auto sizes = Sizes();
+  ASSERT_NE(sizes.end(),
+            std::find(sizes.begin(), sizes.end(), kUnknownBlobRawSize));
+  VerifyLive();
+  Flush();
+  CompactAll();
+  CheckSingleOutput();  // The replacement indices have real lengths.
+}
+
+TEST_F(RawSizePropertiesTest, CorruptLegacyBlobFailsCompaction) {
+  options_.enable_blob_raw_size_properties = false;
+  options_.min_blob_size = 65536;
+  Open();
+  Seed();  // Inline inputs will create output blobs before the later error.
+  ASSERT_OK(db_->Put(WriteOptions(), "zz", std::string(70000, 'z')));
+  Flush();
+  options_.enable_blob_raw_size_properties = true;
+  options_.min_blob_size = 32;
+  options_.blob_file_target_size =
+      1024;  // Also exercise rotated output cleanup.
+  Reopen();
+  auto blob_files = [&] {
+    std::vector<std::string> files, blobs;
+    EXPECT_OK(env_->GetChildren(options_.dirname, &files));
+    for (const auto& file : files) {
+      if (file.size() > 5 && file.substr(file.size() - 5) == ".blob")
+        blobs.push_back(file);
+    }
+    std::sort(blobs.begin(), blobs.end());
+    return blobs;
+  };
+  const auto original_blobs = blob_files();
+  std::vector<LiveFileMetaData> before, after;
+  db_->GetLiveFilesMetaData(&before);
+  SyncPoint::GetInstance()->SetCallBack(
+      "BlobDecoder::DecodeRecord",
+      [](void* arg) { ++*static_cast<uint32_t*>(arg); });
+  std::vector<std::string> inputs;
+  for (const auto& file : before) inputs.push_back(file.name);
+  auto status = db_->CompactFiles(CompactionOptions(), inputs, 6);
+  ASSERT_TRUE(status.IsCorruption()) << status.ToString();
+  ASSERT_GT(reads_, 0);
+  SyncPoint::GetInstance()->ClearCallBack("BlobDecoder::DecodeRecord");
+  db_->GetLiveFilesMetaData(&after);
+  ASSERT_EQ(before.size(), after.size());
+  ASSERT_EQ(original_blobs, blob_files());
+  for (size_t i = 0; i < before.size(); ++i)
+    ASSERT_EQ(before[i].name, after[i].name);
+  VerifyLive();
+}
+
+TEST_F(RawSizePropertiesTest, UnknownLiveEntryIsRetried) {
+  Open();
+  Seed();
+  GC();
+  GetBlobStorage().lock()->raw_sizes()->cache->SetCapacity(0);
+  // Simulate a transient missing-file response; the live blob remains on disk.
+  // Its unknown array slot must be retried on the subsequent compaction.
+  SyncPoint::GetInstance()->SetCallBack(
+      "TitanTableBuilder::ResolveRawSize:Result", [](void* arg) {
+        *static_cast<Status*>(arg) =
+            Status::NotFound("injected for retry test");
+      });
+  Flush();
+  auto sizes = Sizes();
+  ASSERT_NE(sizes.end(),
+            std::find(sizes.begin(), sizes.end(), kUnknownBlobRawSize));
+  SyncPoint::GetInstance()->ClearCallBack(
+      "TitanTableBuilder::ResolveRawSize:Result");
+  reads_ = 0;
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_GT(reads_, 0);
+}
+
 }  // namespace titandb
 }  // namespace rocksdb
 

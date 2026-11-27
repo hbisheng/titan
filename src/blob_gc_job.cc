@@ -128,6 +128,10 @@ BlobGCJob::~BlobGCJob() {
 }
 
 Status BlobGCJob::Prepare() {
+  auto storage =
+      blob_file_set_->GetBlobStorage(blob_gc_->column_family_handle()->GetID())
+          .lock();
+  if (storage) raw_sizes_ = storage->raw_sizes();
   SavePrevIOBytes(&prev_bytes_read_, &prev_bytes_written_);
   return Status::OK();
 }
@@ -306,6 +310,7 @@ void BlobGCJob::BatchWriteNewIndices(BlobFileBuilder::OutContexts& contexts,
       return;
     }
     blob_index.EncodeTo(&index_entry);
+    if (raw_sizes_) raw_sizes_->Put(index_entry, ctx->raw_value_size);
     // Store WriteBatch for rewriting new Key-Index pairs to LSM
     GarbageCollectionWriteCallback callback(cfh, ikey.user_key.ToString(),
                                             original_index, blob_index);

@@ -1,12 +1,12 @@
 #pragma once
 
+#include "blob_format.h"
 #include "file/writable_file_writer.h"
 #include "table/meta_blocks.h"
+#include "titan/blob_raw_size.h"
+#include "titan/options.h"
 #include "util/autovector.h"
 #include "util/compression.h"
-
-#include "blob_format.h"
-#include "titan/options.h"
 
 namespace rocksdb {
 namespace titandb {
@@ -59,6 +59,7 @@ class BlobFileBuilder {
     std::string key;  // original internal key
     BlobIndex original_blob_index;
     BlobIndex new_blob_index;
+    uint64_t raw_value_size = kUnknownBlobRawSize;
     bool has_value = false;
     std::string value;
   };

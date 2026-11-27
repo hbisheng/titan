@@ -74,6 +74,10 @@ struct ImmutableTitanCFOptions;
 struct MutableTitanCFOptions;
 
 struct TitanCFOptions : public ColumnFamilyOptions {
+  // Persist per-BlobIndex raw value sizes in SST properties. Legacy BlobIndex
+  // and WAL encodings are unchanged. Enabling may read blobs during backfill.
+  bool enable_blob_raw_size_properties = false;
+
   // The smallest value to store in blob files. Value smaller than
   // this threshold will be inlined in base DB.
   //
@@ -197,7 +201,8 @@ struct ImmutableTitanCFOptions {
   ImmutableTitanCFOptions() : ImmutableTitanCFOptions(TitanCFOptions()) {}
 
   explicit ImmutableTitanCFOptions(const TitanCFOptions& opts)
-      : blob_file_target_size(opts.blob_file_target_size),
+      : enable_blob_raw_size_properties(opts.enable_blob_raw_size_properties),
+        blob_file_target_size(opts.blob_file_target_size),
         blob_cache(opts.blob_cache),
         max_gc_batch_size(opts.max_gc_batch_size),
         min_gc_batch_size(opts.min_gc_batch_size),
@@ -205,6 +210,7 @@ struct ImmutableTitanCFOptions {
         level_merge(opts.level_merge),
         skip_value_in_compaction_filter(opts.skip_value_in_compaction_filter) {}
 
+  bool enable_blob_raw_size_properties;
   uint64_t blob_file_target_size;
 
   std::shared_ptr<Cache> blob_cache;

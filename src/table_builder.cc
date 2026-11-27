@@ -65,7 +65,12 @@ void TitanTableBuilder::Add(const Slice& key, const Slice& value) {
       // output.
       // TODO: return error if it is indeed an error.
       assert(blob_builder_ == nullptr);
-      base_builder_->Add(key, value);
+      if (raw_sizes_ && !get_status.IsNotFound() &&
+          !get_status.IsPathNotFound()) {
+        status_ = get_status;
+        return;
+      }
+      AddBase(key, ikey, value);
     }
   } else if (ikey.type == kTypeValue &&
              cf_options_.blob_run_mode == TitanBlobRunMode::kNormal) {
@@ -119,18 +124,64 @@ void TitanTableBuilder::Add(const Slice& key, const Slice& value) {
 void TitanTableBuilder::AddBase(const Slice& key,
                                 const ParsedInternalKey& parsedKey,
                                 const Slice& value) {
+  uint64_t raw_size = kUnknownBlobRawSize;
+  if (cf_options_.enable_blob_raw_size_properties &&
+      parsedKey.type == kTypeTitanBlobIndex) {
+    raw_size = ResolveRawSize(value);
+    if (!ok()) return;
+  }
   // "parsedKey" was parsed from "key" (i.e., an internal key).
   if (builder_unbuffered()) {
     // We can directly append this into SST safely, without disorder issue.
     // Only when base_builder_ is in unbuffered state
-    base_builder_->Add(key, value);
+    AddWithRawSize(key, value, raw_size);
   } else {
     // We have to let builder to cache this KV pair, and it will be flushed to
     // base table when the state changes to unbuffered
     std::unique_ptr<BlobFileBuilder::BlobRecordContext> ctx =
         NewCachedRecordContext(parsedKey, value);
+    ctx->raw_value_size = raw_size;
     blob_builder_->AddSmall(std::move(ctx));
   }
+}
+
+uint64_t TitanTableBuilder::ResolveRawSize(const Slice& value) {
+  auto encoded = value.ToString();
+  for (const auto& input : input_raw_sizes_) {
+    auto entry = input->find(encoded);
+    if (entry != input->end()) return entry->second;
+  }
+  uint64_t size;
+  if (raw_sizes_ && raw_sizes_->Get(value, &size)) return size;
+  BlobIndex index;
+  Slice copy = value;
+  status_ = index.DecodeFrom(&copy);
+  if (!ok()) return kUnknownBlobRawSize;
+  BlobRecord record;
+  OwnedSlice buffer;
+  TEST_SYNC_POINT("TitanTableBuilder::ResolveRawSize:ReadBlob");
+  uint64_t prev_read = 0, prev_written = 0;
+  SavePrevIOBytes(&prev_read, &prev_written);
+  auto s = GetBlobRecord(index, &record, &buffer);
+  UpdateIOBytes(prev_read, prev_written, &io_bytes_read_, &io_bytes_written_);
+  TEST_SYNC_POINT_CALLBACK("TitanTableBuilder::ResolveRawSize:Result", &s);
+  if (s.ok()) {
+    bytes_read_ += record.size();
+    return record.value.size();
+  }
+  // GC can retire a file before stale indices disappear from the LSM.
+  // Preserve the index and retry unknown entries at the next rewrite.
+  if (!s.IsNotFound() && !s.IsPathNotFound()) status_ = s;
+  return kUnknownBlobRawSize;
+}
+
+void TitanTableBuilder::AddWithRawSize(const Slice& key, const Slice& value,
+                                       uint64_t raw_size) {
+  // RocksDB calls all property collectors synchronously from Add, including
+  // while its compression dictionary is buffering data blocks.
+  BlobRawSizeScope scope(cf_options_.enable_blob_raw_size_properties ? &raw_size
+                                                                     : nullptr);
+  base_builder_->Add(key, value);
 }
 
 void TitanTableBuilder::AddBlob(const ParsedInternalKey& ikey,
@@ -203,7 +254,7 @@ void TitanTableBuilder::AddBlobResultsToBase(
     }
     if (ctx->has_value) {
       // write directly to base table
-      base_builder_->Add(ctx->key, ctx->value);
+      AddWithRawSize(ctx->key, ctx->value, ctx->raw_value_size);
     } else {
       RecordTick(statistics(stats_), TITAN_BLOB_FILE_BYTES_WRITTEN,
                  ctx->new_blob_index.blob_handle.size);
@@ -214,7 +265,7 @@ void TitanTableBuilder::AddBlobResultsToBase(
       ikey.type = kTypeTitanBlobIndex;
       std::string index_key;
       AppendInternalKey(&index_key, ikey);
-      base_builder_->Add(index_key, index_value);
+      AddWithRawSize(index_key, index_value, ctx->raw_value_size);
     }
   }
 }
@@ -259,7 +310,10 @@ void TitanTableBuilder::FinishBlobFile() {
           db_options_.info_log,
           "Titan table builder finish failed. Delete output file %" PRIu64 ".",
           blob_handle_->GetNumber());
-      status_ = blob_manager_->DeleteFile(std::move(blob_handle_));
+      if (status_.ok()) status_ = s;
+      auto cleanup = blob_manager_->DeleteFile(std::move(blob_handle_));
+      if (status_.ok()) status_ = cleanup;
+      blob_builder_.reset();
     }
   }
 }
@@ -276,12 +330,23 @@ Status TitanTableBuilder::status() const {
 }
 
 Status TitanTableBuilder::Finish() {
+  if (!ok()) {
+    Abandon();
+    return status();
+  }
   FinishBlobFile();
+  if (!ok()) {
+    Abandon();
+    return status();
+  }
   // `FinishBlobFile()` may transform its state from `kBuffered` to
   // `kUnbuffered`, in this case, the relative blob handles will be updated, so
   // `base_builder_->Finish()` have to be after `FinishBlobFile()`
-  base_builder_->Finish();
-  status_ = blob_manager_->BatchFinishFiles(cf_id_, finished_blobs_);
+  status_ = base_builder_->Finish();
+  if (status_.ok() && !finished_blobs_.empty()) {
+    status_ = blob_manager_->BatchFinishFiles(cf_id_, finished_blobs_);
+  }
+  if (!status_.ok()) DeleteUnfinishedBlobs();
   if (!status_.ok()) {
     TITAN_LOG_ERROR(db_options_.info_log,
                     "Titan table builder failed on finish: %s",
@@ -298,14 +363,23 @@ Status TitanTableBuilder::Finish() {
 
 void TitanTableBuilder::Abandon() {
   base_builder_->Abandon();
+  DeleteUnfinishedBlobs();
+}
+
+void TitanTableBuilder::DeleteUnfinishedBlobs() {
   if (blob_builder_) {
-    TITAN_LOG_INFO(db_options_.info_log,
-                   "Titan table builder abandoned. Delete output file %" PRIu64
-                   ".",
-                   blob_handle_->GetNumber());
     blob_builder_->Abandon();
-    status_ = blob_manager_->DeleteFile(std::move(blob_handle_));
+    blob_builder_.reset();
   }
+  auto remove = [&](std::unique_ptr<BlobFileHandle> handle) {
+    auto s = blob_manager_->DeleteFile(std::move(handle));
+    if (status_.ok()) status_ = s;
+  };
+  if (blob_handle_) remove(std::move(blob_handle_));
+  for (auto& blob : finished_blobs_) {
+    if (blob.second) remove(std::move(blob.second));
+  }
+  finished_blobs_.clear();
 }
 
 uint64_t TitanTableBuilder::NumEntries() const {
@@ -389,8 +463,12 @@ Status TitanTableBuilder::GetBlobRecord(const BlobIndex& index,
   if (it == input_file_prefetchers_.end()) {
     std::unique_ptr<BlobFilePrefetcher> prefetcher;
     auto storage = blob_storage_.lock();
-    assert(storage != nullptr);
-    s = storage->NewPrefetcher(index.file_number, &prefetcher);
+    if (storage) {
+      s = storage->NewPrefetcher(index.file_number, &prefetcher);
+    } else {
+      assert(recovery_file_cache_);
+      s = recovery_file_cache_->NewPrefetcher(index.file_number, &prefetcher);
+    }
     if (s.ok()) {
       it = input_file_prefetchers_
                .emplace(index.file_number, std::move(prefetcher))

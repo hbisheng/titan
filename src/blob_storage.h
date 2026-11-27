@@ -4,11 +4,11 @@
 #endif
 #include <cinttypes>
 
-#include "rocksdb/options.h"
-
 #include "blob_file_cache.h"
 #include "blob_format.h"
 #include "blob_gc.h"
+#include "blob_raw_size.h"
+#include "rocksdb/options.h"
 #include "titan_stats.h"
 
 namespace rocksdb {
@@ -34,7 +34,11 @@ class BlobStorage {
         file_cache_(_file_cache),
         destroyed_(false),
         stats_(stats),
-        initialized_(initialized) {}
+        initialized_(initialized) {
+    if (_cf_options.enable_blob_raw_size_properties) {
+      raw_sizes_ = std::make_shared<BlobRawSizeState>();
+    }
+  }
 
   ~BlobStorage() {
     for (auto& file : files_) {
@@ -54,6 +58,8 @@ class BlobStorage {
     MutexLock l(&mutex_);
     return gc_score_;
   }
+
+  std::shared_ptr<BlobRawSizeState> raw_sizes() const { return raw_sizes_; }
 
   Cache* blob_cache() { return blob_cache_.get(); }
 
@@ -179,6 +185,7 @@ class BlobStorage {
   bool RemoveFile(uint64_t file_number);
 
   TitanDBOptions db_options_;
+  std::shared_ptr<BlobRawSizeState> raw_sizes_;
   TitanCFOptions cf_options_;
   MutableTitanCFOptions mutable_cf_options_;
   const uint32_t cf_id_;

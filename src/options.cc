@@ -33,6 +33,8 @@ TitanCFOptions::TitanCFOptions(const ColumnFamilyOptions& cf_opts,
                                const ImmutableTitanCFOptions& immutable_opts,
                                const MutableTitanCFOptions& mutable_opts)
     : ColumnFamilyOptions(cf_opts),
+      enable_blob_raw_size_properties(
+          immutable_opts.enable_blob_raw_size_properties),
       min_blob_size(mutable_opts.min_blob_size),
       blob_file_compression(mutable_opts.blob_file_compression),
       blob_file_target_size(immutable_opts.blob_file_target_size),
@@ -48,6 +50,8 @@ TitanCFOptions::TitanCFOptions(const ColumnFamilyOptions& cf_opts,
       enable_punch_hole_gc(immutable_opts.enable_punch_hole_gc) {}
 
 void TitanCFOptions::Dump(Logger* logger) const {
+  TITAN_LOG_HEADER(logger, "TitanCFOptions.enable_blob_raw_size_properties: %d",
+                   static_cast<int>(enable_blob_raw_size_properties));
   TITAN_LOG_HEADER(logger,
                    "TitanCFOptions.min_blob_size                : %" PRIu64,
                    min_blob_size);

@@ -13,14 +13,21 @@ namespace titandb {
 class BlobFileSizeCollectorFactory final
     : public TablePropertiesCollectorFactory {
  public:
+  explicit BlobFileSizeCollectorFactory(bool raw_sizes = false)
+      : raw_sizes_(raw_sizes) {}
   TablePropertiesCollector* CreateTablePropertiesCollector(
       TablePropertiesCollectorFactory::Context context) override;
 
   const char* Name() const override { return "BlobFileSizeCollector"; }
+
+ private:
+  bool raw_sizes_;
 };
 
 class BlobFileSizeCollector final : public TablePropertiesCollector {
  public:
+  explicit BlobFileSizeCollector(bool raw_sizes = false)
+      : collect_raw_sizes_(raw_sizes) {}
   const static std::string kPropertiesName;
 
   static bool Encode(const std::map<uint64_t, uint64_t>& blob_files_size,
@@ -37,6 +44,8 @@ class BlobFileSizeCollector final : public TablePropertiesCollector {
   const char* Name() const override { return "BlobFileSizeCollector"; }
 
  private:
+  bool collect_raw_sizes_;
+  std::string raw_sizes_;
   std::map<uint64_t, uint64_t> blob_files_size_;
 };
 

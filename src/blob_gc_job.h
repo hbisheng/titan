@@ -43,6 +43,7 @@ class BlobGCJob {
 
   void UpdateInternalOpStats();
 
+  std::shared_ptr<BlobRawSizeState> raw_sizes_;
   BlobGC *blob_gc_;
   DB *base_db_;
   DBImpl *base_db_impl_;

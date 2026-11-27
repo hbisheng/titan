@@ -18,6 +18,12 @@ void BaseDbListener::OnFlushCompleted(DB* /*db*/,
   }
 }
 
+void BaseDbListener::OnCompactionBegin(DB*, const CompactionJobInfo& info) {
+  if (db_impl_->blob_file_set_->IsOpened()) {
+    db_impl_->OnCompactionBegin(info);
+  }
+}
+
 void BaseDbListener::OnCompactionCompleted(
     DB* /* db */, const CompactionJobInfo& compaction_job_info) {
   if (db_impl_->blob_file_set_->IsOpened()) {

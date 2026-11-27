@@ -28,7 +28,17 @@ class TitanTableBuilder : public TableBuilder {
         blob_storage_(blob_storage),
         stats_(stats),
         target_level_(target_level),
-        merge_level_(merge_level) {}
+        merge_level_(merge_level) {
+    auto storage = blob_storage_.lock();
+    if (storage && storage->raw_sizes()) {
+      raw_sizes_ = storage->raw_sizes();
+      input_raw_sizes_ = raw_sizes_->Inputs();
+    } else if (cf_options_.enable_blob_raw_size_properties) {
+      // WAL references durable blob files even before the manifest opens.
+      recovery_file_cache_.reset(
+          new BlobFileCache(db_options_, cf_options_, NewLRUCache(0), stats_));
+    }
+  }
 
   void Add(const Slice& key, const Slice& value) override;
 
@@ -81,6 +91,12 @@ class TitanTableBuilder : public TableBuilder {
   void AddBase(const Slice& key, const ParsedInternalKey& parsedKey,
                const Slice& value);
 
+  uint64_t ResolveRawSize(const Slice& value);
+  void AddWithRawSize(const Slice& key, const Slice& value, uint64_t raw_size);
+  void DeleteUnfinishedBlobs();
+
+  std::shared_ptr<BlobRawSizeState> raw_sizes_;
+  std::vector<std::shared_ptr<const BlobRawSizes>> input_raw_sizes_;
   Status status_;
   uint32_t cf_id_;
   TitanDBOptions db_options_;
@@ -93,6 +109,8 @@ class TitanTableBuilder : public TableBuilder {
   std::vector<
       std::pair<std::shared_ptr<BlobFileMeta>, std::unique_ptr<BlobFileHandle>>>
       finished_blobs_;
+  // Must outlive prefetchers, whose cleanup releases handles in this cache.
+  std::unique_ptr<BlobFileCache> recovery_file_cache_;
   std::unordered_map<uint64_t, std::unique_ptr<BlobFilePrefetcher>>
       input_file_prefetchers_;
   TitanStats* stats_;

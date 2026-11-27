@@ -192,6 +192,8 @@ class TitanDBImpl : public TitanDB {
 
   void OnFlushCompleted(const FlushJobInfo& flush_job_info);
 
+  void OnCompactionBegin(const CompactionJobInfo& info);
+
   void OnCompactionCompleted(const CompactionJobInfo& compaction_job_info);
 
   void StartBackgroundTasks();

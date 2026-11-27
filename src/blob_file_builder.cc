@@ -74,6 +74,7 @@ void BlobFileBuilder::Add(const BlobRecord& record,
                           std::unique_ptr<BlobRecordContext> ctx,
                           OutContexts* out_ctx) {
   if (!ok()) return;
+  ctx->raw_value_size = record.value.size();
   std::string key = record.key.ToString();
   if (builder_state_ == BuilderState::kBuffered) {
     std::string record_str;
