@@ -30,6 +30,10 @@ class TitanTableBuilder : public TableBuilder {
         target_level_(target_level),
         merge_level_(merge_level) {
     auto storage = blob_storage_;
+    if (!storage && cf_options_.blob_run_mode == TitanBlobRunMode::kNormal) {
+      status_ = Status::ColumnFamilyDropped();
+      return;
+    }
     if (storage && storage->raw_sizes()) {
       raw_sizes_ = storage->raw_sizes();
     } else if (cf_options_.enable_blob_raw_size_properties) {

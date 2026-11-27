@@ -2418,68 +2418,83 @@ TEST_F(RawSizePropertiesTest, RecoveryFlushReadsDurableBlobs) {
 }
 
 TEST_F(RawSizePropertiesTest, DropDuringBackfillKeepsStorageAlive) {
-  options_.enable_blob_raw_size_properties = false;
-  options_.statistics.reset();  // Stats would otherwise retain the CF storage.
-  options_.level0_file_num_compaction_trigger = 2;
-  Open();
-  AddCF("review-drop");
-  for (int batch = 0; batch < 3; ++batch) {
-    for (int i = 0; i < 32; ++i)
-      ASSERT_OK(db_->Put(WriteOptions(), cf_handles_[0], GenKey(i),
-                         Value(batch * 32 + i)));
-    Flush();
-  }
-  options_.enable_blob_raw_size_properties = true;
-  Reopen();
-  size_t cf_index = 0;
-  while (cf_index < cf_handles_.size() &&
-         cf_handles_[cf_index]->GetName() != "review-drop")
-    ++cf_index;
-  ASSERT_LT(cf_index, cf_handles_.size());
-  auto* handle = cf_handles_[cf_index];
-  auto storage = GetBlobStorage(handle);
-  port::Mutex gate;
-  port::CondVar cv(&gate);
-  bool ready = false, resume = false;
-  SyncPoint::GetInstance()->SetCallBack(
-      "TitanTableBuilder::ResolveRawSize:ReadBlob", [&](void*) {
-        MutexLock lock(&gate);
-        if (ready) return;
-        ready = true;
-        cv.SignalAll();
-        while (!resume) cv.Wait();
-      });
-  ASSERT_OK(db_->EnableAutoCompaction({handle}));
-  {
-    MutexLock lock(&gate);
-    auto deadline = env_->NowMicros() + 10000000;
-    while (!ready && !cv.TimedWait(deadline)) {
+  const auto initial_options = options_;
+  for (bool before_builder : {false, true}) {
+    SCOPED_TRACE(before_builder);
+    options_ = initial_options;
+    options_.enable_blob_raw_size_properties = false;
+    options_.statistics
+        .reset();  // Stats would otherwise retain the CF storage.
+    options_.level0_file_num_compaction_trigger = 2;
+    Open();
+    AddCF("review-drop");
+    for (int batch = 0; batch < 3; ++batch) {
+      for (int i = 0; i < 32; ++i)
+        ASSERT_OK(db_->Put(WriteOptions(), cf_handles_[0], GenKey(i),
+                           Value(batch * 32 + i)));
+      Flush();
     }
+    options_.enable_blob_raw_size_properties = true;
+    options_.level_merge = before_builder;
+    options_.level_compaction_dynamic_level_bytes = before_builder;
+    Reopen();
+    size_t cf_index = 0;
+    while (cf_index < cf_handles_.size() &&
+           cf_handles_[cf_index]->GetName() != "review-drop")
+      ++cf_index;
+    ASSERT_LT(cf_index, cf_handles_.size());
+    auto* handle = cf_handles_[cf_index];
+    auto storage = GetBlobStorage(handle);
+    port::Mutex gate;
+    port::CondVar cv(&gate);
+    bool ready = false, resume = false;
+    const char* point = before_builder
+                            ? "BlockBasedTableBuilder::BlockBasedTableBuilder:"
+                              "PreSetupBaseCacheKey"
+                            : "TitanTableBuilder::ResolveRawSize:ReadBlob";
+    SyncPoint::GetInstance()->SetCallBack(point, [&](void*) {
+      MutexLock lock(&gate);
+      if (ready) return;
+      ready = true;
+      cv.SignalAll();
+      while (!resume) cv.Wait();
+    });
+    ASSERT_OK(db_->EnableAutoCompaction({handle}));
+    {
+      MutexLock lock(&gate);
+      auto deadline = env_->NowMicros() + 10000000;
+      while (!ready && !cv.TimedWait(deadline)) {
+      }
+    }
+    auto drop = db_->DropColumnFamily(handle);
+    auto destroy = db_->DestroyColumnFamilyHandle(handle);
+    cf_handles_.erase(cf_handles_.begin() + cf_index);
+    cf_names_.erase(cf_names_.begin() + cf_index);
+    auto advance = db_->Put(WriteOptions(), "advance-sequence", "small");
+    auto purge = db_impl_->TEST_PurgeObsoleteFiles();
+    const bool storage_alive = !storage.expired();
+    {
+      MutexLock lock(&gate);
+      resume = true;
+      cv.SignalAll();
+    }
+    auto compact =
+        static_cast<rocksdb::DBImpl*>(db_->GetRootDB())->TEST_WaitForCompact();
+    SyncPoint::GetInstance()->ClearCallBack(point);
+    ASSERT_TRUE(ready);
+    ASSERT_EQ(!before_builder, storage_alive);
+    ASSERT_OK(drop);
+    ASSERT_OK(destroy);
+    ASSERT_OK(advance);
+    ASSERT_OK(purge);
+    ASSERT_TRUE(compact.ok() || compact.IsColumnFamilyDropped())
+        << compact.ToString();
+    Close();
+    DeleteDir(env_, options_.dirname);
+    DeleteDir(env_, dbname_);
+    cf_handles_.clear();
+    cf_names_.clear();
   }
-  auto drop = db_->DropColumnFamily(handle);
-  auto destroy = db_->DestroyColumnFamilyHandle(handle);
-  cf_handles_.erase(cf_handles_.begin() + cf_index);
-  cf_names_.erase(cf_names_.begin() + cf_index);
-  auto advance = db_->Put(WriteOptions(), "advance-sequence", "small");
-  auto purge = db_impl_->TEST_PurgeObsoleteFiles();
-  const bool storage_alive = !storage.expired();
-  {
-    MutexLock lock(&gate);
-    resume = true;
-    cv.SignalAll();
-  }
-  auto compact =
-      static_cast<rocksdb::DBImpl*>(db_->GetRootDB())->TEST_WaitForCompact();
-  SyncPoint::GetInstance()->ClearCallBack(
-      "TitanTableBuilder::ResolveRawSize:ReadBlob");
-  ASSERT_TRUE(ready);
-  ASSERT_TRUE(storage_alive);
-  ASSERT_OK(drop);
-  ASSERT_OK(destroy);
-  ASSERT_OK(advance);
-  ASSERT_OK(purge);
-  ASSERT_TRUE(compact.ok() || compact.IsColumnFamilyDropped())
-      << compact.ToString();
 }
 
 TEST_F(RawSizePropertiesTest, EmptyBlobIsKnown) {

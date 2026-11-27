@@ -49,7 +49,7 @@ TableBuilder *TitanTableFactory::NewTableBuilder(
   TitanCFOptions cf_options = cf_options_;
   cf_options.UpdateMutableOptions(mutable_cf_options_);
 
-  std::weak_ptr<BlobStorage> blob_storage;
+  std::shared_ptr<BlobStorage> blob_storage;
 
   // since we force use dynamic_level_bytes=true when level_merge=true, the last
   // level of a cf is always cf_options.num_levels - 1.
@@ -57,7 +57,8 @@ TableBuilder *TitanTableFactory::NewTableBuilder(
 
   {
     MutexLock l(db_mutex_);
-    blob_storage = blob_file_set_->GetBlobStorage(options.column_family_id);
+    blob_storage =
+        blob_file_set_->GetBlobStorage(options.column_family_id).lock();
   }
 
   return new TitanTableBuilder(
