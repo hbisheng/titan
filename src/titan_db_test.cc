@@ -12,6 +12,7 @@
 #include "options/cf_options.h"
 #include "port/port.h"
 #include "raw_size_iterator.h"
+#include "rocksdb/file_system.h"
 #include "rocksdb/utilities/debug.h"
 #include "test_util/sync_point.h"
 #include "test_util/testharness.h"
@@ -2332,6 +2333,26 @@ TEST_F(RawSizePropertiesTest, FlushAndCompactionReuse) {
   ASSERT_FALSE(GetCurrentBlobRawSize(&size));
 }
 
+TEST_F(RawSizePropertiesTest, LevelMergeAndFallbackKeepSizes) {
+  options_.level_merge = true;
+  options_.level_compaction_dynamic_level_bytes = true;
+  options_.blob_file_compression = kZSTD;
+  options_.blob_file_compression_options.max_dict_bytes = 4096;
+  options_.blob_file_compression_options.zstd_max_train_bytes = 16384;
+  Open();
+  Seed();
+  CompactAll();
+  CheckSingleOutput();
+  ASSERT_GT(options_.statistics->getTickerCount(TITAN_GC_NUM_KEYS_RELOCATED),
+            0);
+  ASSERT_EQ(0, reads_);
+  options_.blob_run_mode = TitanBlobRunMode::kFallback;
+  Reopen();
+  CompactAll();
+  ASSERT_TRUE(Sizes().empty());
+  VerifyLive();
+}
+
 TEST_F(RawSizePropertiesTest, LegacyBackfillAndDowngrade) {
   options_.enable_blob_raw_size_properties = false;
   Open();
@@ -2485,6 +2506,66 @@ TEST_F(RawSizePropertiesTest, CorruptLegacyBlobFailsCompaction) {
   for (size_t i = 0; i < before.size(); ++i)
     ASSERT_EQ(before[i].name, after[i].name);
   VerifyLive();
+}
+
+TEST_F(RawSizePropertiesTest, RotatedBlobFinishErrorIsPreserved) {
+  class FailBlobAppendFS : public FileSystemWrapper {
+   public:
+    explicit FailBlobAppendFS(const std::shared_ptr<FileSystem>& fs)
+        : FileSystemWrapper(fs) {}
+    const char* Name() const override { return "FailBlobAppendFS"; }
+    IOStatus NewWritableFile(const std::string& path, const FileOptions& opts,
+                             std::unique_ptr<FSWritableFile>* file,
+                             IODebugContext* dbg) override {
+      auto status = target()->NewWritableFile(path, opts, file, dbg);
+      if (status.ok() && path.size() > 5 &&
+          path.substr(path.size() - 5) == ".blob") {
+        class BlobFile : public FSWritableFileOwnerWrapper {
+         public:
+          BlobFile(std::unique_ptr<FSWritableFile> file, bool* fail)
+              : FSWritableFileOwnerWrapper(std::move(file)), fail_(fail) {}
+          using FSWritableFileOwnerWrapper::Append;
+          IOStatus Append(const Slice& data, const IOOptions& options,
+                          IODebugContext* dbg) override {
+            if (*fail_) {
+              *fail_ = false;
+              return IOStatus::IOError("injected blob finish error");
+            }
+            return target()->Append(data, options, dbg);
+          }
+
+         private:
+          bool* fail_;
+        };
+        file->reset(new BlobFile(std::move(*file), &fail));
+      }
+      return status;
+    }
+    bool fail = false;
+  };
+  auto fs = std::make_shared<FailBlobAppendFS>(env_->GetFileSystem());
+  auto fault_env = NewCompositeEnv(fs);
+  options_.env = fault_env.get();
+  options_.min_blob_size = 65536;
+  Open();
+  Seed();  // Keep the original values inline and readable if compaction fails.
+  options_.min_blob_size = 32;
+  options_.blob_file_target_size = 1;
+  Reopen();
+  std::vector<LiveFileMetaData> before, after;
+  db_->GetLiveFilesMetaData(&before);
+  std::vector<std::string> inputs;
+  for (const auto& file : before) inputs.push_back(file.name);
+  fs->fail = true;  // Fail the first blob's flush during output rotation.
+  auto status = db_->CompactFiles(CompactionOptions(), inputs, 6);
+  db_->GetLiveFilesMetaData(&after);
+  VerifyLive();
+  Close();  // Keep the borrowed Env alive until the DB is closed.
+  ASSERT_FALSE(fs->fail);
+  ASSERT_TRUE(status.IsIOError()) << status.ToString();
+  ASSERT_EQ(before.size(), after.size());
+  for (size_t i = 0; i < before.size(); ++i)
+    ASSERT_EQ(before[i].name, after[i].name);
 }
 
 TEST_F(RawSizePropertiesTest, UnknownLiveEntryIsRetried) {

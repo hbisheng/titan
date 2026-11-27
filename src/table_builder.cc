@@ -240,7 +240,7 @@ void TitanTableBuilder::AddBlob(const ParsedInternalKey& ikey,
 
 void TitanTableBuilder::AddBlobResultsToBase(
     const BlobFileBuilder::OutContexts& contexts) {
-  if (contexts.empty()) return;
+  if (!ok() || contexts.empty()) return;
   for (const std::unique_ptr<BlobFileBuilder::BlobRecordContext>& ctx :
        contexts) {
     ParsedInternalKey ikey;
