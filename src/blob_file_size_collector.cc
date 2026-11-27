@@ -85,8 +85,9 @@ Status BlobFileSizeCollector::AddUserKey(const Slice& key, const Slice& value,
 Status BlobFileSizeCollector::Finish(UserCollectedProperties* properties) {
   if (blob_files_size_.empty()) return Status::OK();
   if (collect_raw_sizes_) {
-    properties->emplace(kBlobRawSizesProperty, raw_sizes_);
-    properties->emplace(kBlobRawSizeAnchorsProperty, raw_size_anchors_);
+    properties->emplace(kBlobRawSizesProperty, std::move(raw_sizes_));
+    properties->emplace(kBlobRawSizeAnchorsProperty,
+                        std::move(raw_size_anchors_));
   }
 
   std::string res;
